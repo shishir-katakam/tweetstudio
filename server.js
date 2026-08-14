@@ -21,20 +21,6 @@ async function fetchJson(url){
   let data; try{data=JSON.parse(text)}catch{data=null}
   return {r,data};
 }
-function originalMediaUrl(src){
-  if(!src) return src;
-  try{
-    const u=new URL(src);
-    // X/Twitter's pbs.twimg.com media endpoint supports `name=orig`.
-    // FxTwitter may return a resized `large`/`medium` variant; always request
-    // the original source for the media downloader when possible.
-    if(/(^|\.)pbs\.twimg\.com$/i.test(u.hostname) && /\/(media|ext_tw_video)\//i.test(u.pathname)){
-      u.searchParams.set('name','orig');
-    }
-    return u.toString();
-  }catch{return src}
-}
-
 async function remoteDataUrl(src){
   if(!src) return '';
   if(src.startsWith('data:')) return src;
@@ -99,7 +85,7 @@ async function handleTweet(req,res,parsed){
   let media=[];
   if(allMedia.length){
     media=allMedia.map(m=>({
-      url:originalMediaUrl(m.type==='video'||m.type==='gif' ? (m.thumbnail_url||m.url) : m.url),
+      url:m.type==='video'||m.type==='gif' ? (m.thumbnail_url||m.url) : m.url,
       width:m.width,
       height:m.height,
       type:m.type||'photo'
@@ -109,9 +95,9 @@ async function handleTweet(req,res,parsed){
     const videos=Array.isArray(mediaObj.videos)?mediaObj.videos:[];
     const external=mediaObj.external?[mediaObj.external]:[];
     media=[
-      ...photos.map(p=>({url:originalMediaUrl(p.url),width:p.width,height:p.height,type:p.type||'photo'})),
-      ...videos.map(v=>({url:originalMediaUrl(v.thumbnail_url||v.url),width:v.width,height:v.height,type:v.type||'video'})),
-      ...external.map(v=>({url:originalMediaUrl(v.thumbnail_url||v.url),width:v.width,height:v.height,type:v.type||'video'}))
+      ...photos.map(p=>({url:p.url,width:p.width,height:p.height,type:p.type||'photo'})),
+      ...videos.map(v=>({url:v.thumbnail_url||v.url,width:v.width,height:v.height,type:v.type||'video'})),
+      ...external.map(v=>({url:v.thumbnail_url||v.url,width:v.width,height:v.height,type:v.type||'video'}))
     ].filter(m=>m.url);
   }
 

@@ -1,12 +1,9 @@
-TweetStudio v27 — Original Media Quality Fix
+# TweetStudio — 8K Default
 
-This build keeps the v26 Instagram-safe 1080×1080 media export and improves source fidelity.
+Updated from v30 so **8K (7680×7680)** is the default export resolution everywhere.
 
-Media quality fixes:
-• X/Twitter pbs.twimg.com media URLs are upgraded to `name=orig` when available instead of using resized `large`/`medium` variants.
-• The complete source image is still contained inside the 1080×1080 square with no cropping or stretching.
-• High-quality browser image resizing is used when supported.
-• PNG export remains lossless; explicit JPEG export uses maximum quality.
-• Original media download remains available separately.
+Theme exports: 1080 / 4K / 8K / 16K, with 8K selected by default.
 
-Run: node server.js
+Post-media square exports: 1080 / 4K / 8K / 16K, with 8K selected by default.
+
+16K remains available as an optional maximum-resolution export.
