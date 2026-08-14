@@ -1,0 +1,9 @@
+{
+  "name":"TweetStudio — X to Instagram Generator",
+  "short_name":"TweetStudio",
+  "start_url":"/",
+  "display":"standalone",
+  "background_color":"#f1f1ec",
+  "theme_color":"#111111",
+  "description":"Convert X posts or text into Instagram-ready square graphics."
+}
