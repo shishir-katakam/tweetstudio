@@ -41,6 +41,19 @@
   "description":"Tweet to Instagram generator that turns X posts or text into Instagram-ready square graphics and carousels.",
   "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}
 }</script>
+<script>
+  window.va = window.va || function(){ (window.vaq = window.vaq || []).push(arguments); };
+  window.va('beforeSend', function(event){
+    try {
+      var u = new URL(event.url);
+      u.searchParams.delete('url');
+      u.searchParams.delete('text');
+      u.searchParams.delete('tweet');
+      return Object.assign({}, event, {url: u.toString()});
+    } catch (_) { return event; }
+  });
+</script>
+<script defer src="/_vercel/insights/script.js"></script>
 </head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-mark">T</div><div><div class="brand-name">TweetStudio</div><div class="brand-sub">X → Instagram graphics</div></div></div><div class="top-actions"><span class="pill" id="sizePill">1080 × 1080</span><button class="btn" id="settingsBtn">Settings</button></div></header>
@@ -937,10 +950,14 @@ async function blobFromSvg(svg,format,size=getExportSize()){
     img.src=svgURL(svg);
   });
 }
+function trackEvent(name,data){
+  try{ if(window.va) window.va('event',{name:name,data:data||{}}); }catch(_){}
+}
+
 function setupTemplateList(){const el=document.getElementById('templateList');el.innerHTML='';TEMPLATES.forEach(t=>{const lab=document.createElement('label');lab.className='template-toggle active';lab.innerHTML=`<input type="checkbox" checked><span class="dot" style="background:${t.color}"></span><span><b>${t.name}</b><small>${t.desc}</small></span>`;const cb=lab.querySelector('input');cb.addEventListener('change',()=>{cb.checked?selected.add(t.id):selected.delete(t.id);lab.classList.toggle('active',cb.checked)});el.appendChild(lab)})}
 function renderPostMeta(){const safe=tweet||{};document.getElementById('charStat').textContent=String(safe.text||'').length.toLocaleString()+' characters';document.getElementById('postName').textContent=safe.authorName||'Unknown account';document.getElementById('postHandle').textContent=safe.handle||'@unknown';document.getElementById('postPreview').textContent=(safe.text||'').length>180?safe.text.slice(0,180)+'…':(safe.text||'');document.getElementById('postAvatar').src=safe.avatar||'';}
 function createResults(){const density=document.getElementById('density').value;results=[];TEMPLATES.filter(t=>selected.has(t.id)).forEach(t=>{const pages=paginate(tweet.text,t.cfg,density);results.push({template:t,slides:pages.map((units,i)=>({svg:render(t.id,tweet,units,i,pages.length),text:pageText(units)}))})});renderResults()}
-function renderResults(){const gallery=document.getElementById('gallery');gallery.innerHTML='';document.getElementById('empty').style.display=results.length?'none':'block';document.getElementById('resultSummary').textContent=results.length?`${results.length} templates · ${results.reduce((n,g)=>n+g.slides.length,0)} slides`:'Your designs will appear here';document.getElementById('downloadAllBtn').disabled=!results.length;results.forEach(group=>{let active=0;const card=document.createElement('article');card.className='card';card.innerHTML=`<div class="card-head"><div><b>${group.template.name}</b><span>${group.template.desc}</span></div><div class="count">${group.slides.length} ${group.slides.length===1?'slide':'slides'}</div></div><div class="preview"><img></div><div class="card-foot"><div class="dots"></div><div class="controls"><button class="prev">←</button><span class="index">1/${group.slides.length}</span><button class="next">→</button><button class="small">Download</button></div></div>`;const img=card.querySelector('img'),dots=card.querySelector('.dots'),prev=card.querySelector('.prev'),next=card.querySelector('.next'),idx=card.querySelector('.index'),dl=card.querySelector('.small');function set(i){active=i;img.src=svgURL(group.slides[i].svg);idx.textContent=(i+1)+'/'+group.slides.length;prev.disabled=i===0;next.disabled=i===group.slides.length-1;[...dots.children].forEach((b,j)=>b.classList.toggle('on',j===i))}group.slides.forEach((_,i)=>{const b=document.createElement('button');if(i===0)b.className='on';b.addEventListener('click',()=>set(i));dots.appendChild(b)});prev.addEventListener('click',()=>set(Math.max(0,active-1)));next.addEventListener('click',()=>set(Math.min(group.slides.length-1,active+1)));dl.addEventListener('click',async()=>{dl.disabled=true;try{const fmt=document.getElementById('format').value;const size=getExportSize();const blob=await blobFromSvg(group.slides[active].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(active+1).padStart(2,'0')}-${size}x${size}.${fmt}`)}catch(e){showError(e.message)}finally{dl.disabled=false}});set(0);gallery.appendChild(card)})}
+function renderResults(){const gallery=document.getElementById('gallery');gallery.innerHTML='';document.getElementById('empty').style.display=results.length?'none':'block';document.getElementById('resultSummary').textContent=results.length?`${results.length} templates · ${results.reduce((n,g)=>n+g.slides.length,0)} slides`:'Your designs will appear here';document.getElementById('downloadAllBtn').disabled=!results.length;results.forEach(group=>{let active=0;const card=document.createElement('article');card.className='card';card.innerHTML=`<div class="card-head"><div><b>${group.template.name}</b><span>${group.template.desc}</span></div><div class="count">${group.slides.length} ${group.slides.length===1?'slide':'slides'}</div></div><div class="preview"><img></div><div class="card-foot"><div class="dots"></div><div class="controls"><button class="prev">←</button><span class="index">1/${group.slides.length}</span><button class="next">→</button><button class="small">Download</button></div></div>`;const img=card.querySelector('img'),dots=card.querySelector('.dots'),prev=card.querySelector('.prev'),next=card.querySelector('.next'),idx=card.querySelector('.index'),dl=card.querySelector('.small');function set(i){active=i;img.src=svgURL(group.slides[i].svg);idx.textContent=(i+1)+'/'+group.slides.length;prev.disabled=i===0;next.disabled=i===group.slides.length-1;[...dots.children].forEach((b,j)=>b.classList.toggle('on',j===i))}group.slides.forEach((_,i)=>{const b=document.createElement('button');if(i===0)b.className='on';b.addEventListener('click',()=>set(i));dots.appendChild(b)});prev.addEventListener('click',()=>set(Math.max(0,active-1)));next.addEventListener('click',()=>set(Math.min(group.slides.length-1,active+1)));dl.addEventListener('click',async()=>{dl.disabled=true;try{const fmt=document.getElementById('format').value;const size=getExportSize();const blob=await blobFromSvg(group.slides[active].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(active+1).padStart(2,'0')}-${size}x${size}.${fmt}`);trackEvent('theme_downloaded',{template:group.template.id,size:size,format:fmt})}catch(e){showError(e.message)}finally{dl.disabled=false}});set(0);gallery.appendChild(card)})}
 async function fetchAssetBlob(src){
   const r=await fetch('/api/asset?url='+encodeURIComponent(src));
   if(!r.ok) throw new Error('Media download failed');
@@ -1005,16 +1022,17 @@ async function renderMedia(){
     card.querySelector('.media-bg').style.backgroundImage=`url("${m.url}")`;
     const mediaImg=card.querySelector('img');
     mediaImg.src=m.url;
-    mediaImg.addEventListener('click',()=>openMediaZoom(m.url));
+    mediaImg.addEventListener('click',()=>{trackEvent('media_previewed',{media_index:i+1});openMediaZoom(m.url)});
     const sq=card.querySelector('.download-square'),orig=card.querySelector('.download-original');
-    sq.addEventListener('click',async()=>{sq.disabled=true;const size=Number(card.querySelector('.media-resolution').value||7680);try{const b=await makeSquareMediaBlob(m.url,'png',size);await downloadBlob(b,`tweetstudio-media-${String(i+1).padStart(2,'0')}-${size}x${size}.png`)}catch(e){showError(e.message)}finally{sq.disabled=false}});
-    orig.addEventListener('click',async()=>{orig.disabled=true;try{const b=await fetchAssetBlob(m.url);const ext=(b.type.split('/')[1]||'jpg').replace('jpeg','jpg');await downloadBlob(b,`tweetstudio-media-${String(i+1).padStart(2,'0')}-original.${ext}`)}catch(e){showError(e.message)}finally{orig.disabled=false}});
+    sq.addEventListener('click',async()=>{sq.disabled=true;const size=Number(card.querySelector('.media-resolution').value||7680);try{const b=await makeSquareMediaBlob(m.url,'png',size);await downloadBlob(b,`tweetstudio-media-${String(i+1).padStart(2,'0')}-${size}x${size}.png`);trackEvent('media_downloaded',{media_index:i+1,size:size,format:'png'})}catch(e){showError(e.message)}finally{sq.disabled=false}});
+    orig.addEventListener('click',async()=>{orig.disabled=true;try{const b=await fetchAssetBlob(m.url);const ext=(b.type.split('/')[1]||'jpg').replace('jpeg','jpg');await downloadBlob(b,`tweetstudio-media-${String(i+1).padStart(2,'0')}-original.${ext}`);trackEvent('original_media_downloaded',{media_index:i+1})}catch(e){showError(e.message)}finally{orig.disabled=false}});
     grid.appendChild(card);
   });
 }
 async function prepareTweetAssets(){ /* no legacy template assets required */ }
 
 async function generateFromData(data,btn){
+  trackEvent('generation_started',{input_mode: document.getElementById('urlModeBtn').classList.contains('active')?'url':'text'});
   btn.textContent='Generating…';
   btn.disabled=true;
   hideError();
@@ -1025,7 +1043,9 @@ async function generateFromData(data,btn){
     renderPostMeta();
     createResults();
     renderMedia();
+    trackEvent('generation_completed',{templates:results.length,slides:results.reduce((n,g)=>n+g.slides.length,0),input_mode: document.getElementById('urlModeBtn').classList.contains('active')?'url':'text'});
   }catch(e){
+    trackEvent('generation_failed',{input_mode: document.getElementById('urlModeBtn').classList.contains('active')?'url':'text'});
     tweet=null;
     renderPostMeta();
     document.getElementById('gallery').innerHTML='';
@@ -1063,8 +1083,8 @@ settingsBtn.setAttribute('aria-expanded','false');
 settingsBtn.addEventListener('click',toggleSettings);
 setupTemplateList();renderPostMeta();
 document.getElementById('closeMediaZoom').addEventListener('click',closeMediaZoom);document.getElementById('mediaZoom').addEventListener('click',e=>{if(e.target.id==='mediaZoom')closeMediaZoom();});document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMediaZoom();});
-document.getElementById('urlModeBtn').addEventListener('click',()=>setInputMode('url'));
-document.getElementById('textModeBtn').addEventListener('click',()=>setInputMode('text'));
+document.getElementById('urlModeBtn').addEventListener('click',()=>{trackEvent('url_mode_used');setInputMode('url')});
+document.getElementById('textModeBtn').addEventListener('click',()=>{trackEvent('text_mode_used');setInputMode('text')});
 document.getElementById('generateBtn').addEventListener('click',async()=>{
   const btn=document.getElementById('generateBtn');
   try{const raw=document.getElementById('urlInput').value.trim();if(!raw)throw new Error('Paste an X/Twitter post URL first.');await generateFromData(await getTweet(raw),btn);}catch(e){showError(e.message);}
@@ -1076,7 +1096,7 @@ document.getElementById('generateTextBtn').addEventListener('click',async()=>{
 document.getElementById('regenBtn').addEventListener('click',async()=>{if(tweet){if(document.fonts?.ready) await document.fonts.ready;createResults();renderMedia();}});
 
 document.getElementById('density').addEventListener('change',createResults);document.getElementById('resolution').addEventListener('change',updateSizePill);updateSizePill();
-document.getElementById('downloadAllBtn').addEventListener('click',async()=>{const fmt=document.getElementById('format').value;const size=getExportSize();const btn=document.getElementById('downloadAllBtn');btn.disabled=true;try{for(const group of results)for(let i=0;i<group.slides.length;i++){const blob=await blobFromSvg(group.slides[i].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(i+1).padStart(2,'0')}-${size}x${size}.${fmt}`)}}catch(e){showError(e.message)}finally{btn.disabled=false}});
+document.getElementById('downloadAllBtn').addEventListener('click',async()=>{const fmt=document.getElementById('format').value;const size=getExportSize();const btn=document.getElementById('downloadAllBtn');btn.disabled=true;try{for(const group of results)for(let i=0;i<group.slides.length;i++){const blob=await blobFromSvg(group.slides[i].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(i+1).padStart(2,'0')}-${size}x${size}.${fmt}`)}trackEvent('download_all',{templates:results.length,size:size,format:fmt})}catch(e){showError(e.message)}finally{btn.disabled=false}});
 </script>
 </body>
 </html>
