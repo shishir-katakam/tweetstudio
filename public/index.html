@@ -1098,5 +1098,9 @@ document.getElementById('regenBtn').addEventListener('click',async()=>{if(tweet)
 document.getElementById('density').addEventListener('change',createResults);document.getElementById('resolution').addEventListener('change',updateSizePill);updateSizePill();
 document.getElementById('downloadAllBtn').addEventListener('click',async()=>{const fmt=document.getElementById('format').value;const size=getExportSize();const btn=document.getElementById('downloadAllBtn');btn.disabled=true;try{for(const group of results)for(let i=0;i<group.slides.length;i++){const blob=await blobFromSvg(group.slides[i].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(i+1).padStart(2,'0')}-${size}x${size}.${fmt}`)}trackEvent('download_all',{templates:results.length,size:size,format:fmt})}catch(e){showError(e.message)}finally{btn.disabled=false}});
 </script>
+<script type="module">
+  import { inject } from 'https://cdn.jsdelivr.net/npm/@vercel/analytics@1/+esm';
+  inject();
+</script>
 </body>
 </html>
