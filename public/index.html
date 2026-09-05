@@ -709,12 +709,12 @@ function reelRenderFont(font){
 }
 function reelTextLayout(text){
   const maxW=760;
-  // Default Reel text is intentionally compact and readable. Only step the
-  // font down when the rendered text block is genuinely too tall for the
-  // preferred text area; short/normal posts keep the default size.
-  const candidates=[42,40,38];
-  const lineHeight=1.06;
-  const maxTextBottom=900;
+  // Keep the text and video in two hard-separated regions. The text region is
+  // allowed to shrink progressively for long posts so the final line can NEVER
+  // enter the video rectangle. The same geometry is used by preview and export.
+  const candidates=[42,40,38,36,34,32,30];
+  const lineHeight=1.12;
+  const maxTextBottom=820;
   let chosen=null;
   for(const fs of candidates){
     const rawLines=wrapMeasured(String(text||''),maxW,reelRenderFont('Inter'),fs,700);
@@ -909,14 +909,19 @@ function reelBackgroundSvg(d,id){
   return `<rect width="1080" height="1920" fill="${d.bg}"/>`;
 }
 function reelVideoGeometry(textLayout,designId){
-  const fs=textLayout.fontSize, lh=fs*textLayout.lineHeight, count=textLayout.linesDetailed.length;
-  // Position the video from the actual bottom of the rendered text, rather than
-  // clamping it to a fixed Y value. This prevents long posts from overlapping.
-  const lastBaseline=370 + Math.max(0,count-1)*lh;
-  const textBottom=lastBaseline + fs*0.16;
-  const y=Math.max(620,textBottom+48);
-  const h=Math.min(760,Math.max(380,1550-y));
-  return {x:64,y,w:760,h};
+  const fs=textLayout.fontSize;
+  const lh=fs*textLayout.lineHeight;
+  const count=textLayout.linesDetailed.length;
+  const firstBaseline=370;
+  const lastBaseline=firstBaseline + Math.max(0,count-1)*lh;
+  const textBottom=lastBaseline + fs*0.18;
+  // Hard boundary: video starts only after the complete text block plus a
+  // generous gap. There is no fixed upper clamp that can push the video back
+  // underneath text.
+  const y=Math.max(680,textBottom+56);
+  const bottomLimit=1550;
+  const h=Math.max(320,Math.min(760,bottomLimit-y));
+  return {x:64,y,w:760,h,textBottom,gap:56};
 }
 function reelSvg(data,units,designId='bold',preview=false,layer='full'){
   const d=reelDesign(designId), text=pageText(units), l=reelTextLayoutDetailed(text), W=1080,H=1920; const renderFont=reelRenderFont(d.font);
@@ -956,7 +961,7 @@ function reelDrawFrame(ctx,canvas,video,data,textLayout,showGuide=false,designId
   ctx.textAlign='left';ctx.fillStyle=d.fg;ctx.font=`800 24px ${renderFont}`;ctx.fillText(String(data?.authorName||'Unknown account'),ax+78,ay+28);
   ctx.fillStyle=d.muted;ctx.font=`500 18px ${renderFont}`;ctx.fillText(String(data?.handle||'@unknown'),ax+78,ay+57);
   ctx.fillStyle=d.accent;ctx.fillRect(64,312,760,4);
-  const fs=textLayout.fontSize,lh=fs*1.18;let y=370;
+  const fs=textLayout.fontSize,lh=fs*textLayout.lineHeight;let y=370;
   for(const line of textLayout.linesDetailed){
     let x=64;
     for(const run of line.runs){
@@ -966,7 +971,8 @@ function reelDrawFrame(ctx,canvas,video,data,textLayout,showGuide=false,designId
     }
     y+=lh;
   }
-  const videoY=Math.min(850,Math.max(620,y+32)),videoH=Math.min(760,Math.max(460,1550-videoY));
+  const rg=reelVideoGeometry(textLayout,designId);
+  const videoY=rg.y,videoH=rg.h;
   if(designId==='glass'||designId==='stack'){ctx.fillStyle=d.card;ctx.globalAlpha=.9;ctx.beginPath();ctx.roundRect(50,videoY-14,788,videoH+28,28);ctx.fill();ctx.globalAlpha=1}
   ctx.fillStyle=d.card;ctx.beginPath();ctx.roundRect(64,videoY,760,videoH,18);ctx.fill();
   if(video&&video.readyState>=2&&video.videoWidth&&video.videoHeight){
@@ -996,21 +1002,23 @@ async function loadMediabunny(){
   return __mediabunnyPromise;
 }
 
-async function exportReel(card, video, data, units, textLayout, designId, remoteVideoUrl='', warmOnly=false, quality='1080'){
+async function exportReel(card, video, data, units, textLayout, designId, remoteVideoUrl='', warmOnly=false, quality='1080-30'){
   const status=card.querySelector('.reel-status');
   const setStatus=t=>{if(status)status.textContent=t};
   if(!video) throw new Error('Add a post video first.');
 
   const qualityConfig={
-    '1080-30':{width:1080,height:1920,fps:30,bitrate:4200000,label:'1080p 30 FPS',speed:'fast'},
-    '1080-60':{width:1080,height:1920,fps:60,bitrate:5200000,label:'1080p 60 FPS',speed:'smooth'},
-    '1440-30':{width:1440,height:2560,fps:30,bitrate:6500000,label:'2K 30 FPS',speed:'fast'},
-    '1440-60':{width:1440,height:2560,fps:60,bitrate:8500000,label:'2K 60 FPS',speed:'smooth'},
-    '2160-30':{width:2160,height:3840,fps:30,bitrate:10000000,label:'4K 30 FPS',speed:'fast'},
-    '2160-60':{width:2160,height:3840,fps:60,bitrate:13000000,label:'4K 60 FPS',speed:'smooth'}
+    '1080-30':{width:1080,height:1920,fps:30,bitrate:4200000,label:'1080p 30 FPS'},
+    '1080-60':{width:1080,height:1920,fps:60,bitrate:5200000,label:'1080p 60 FPS'},
+    '1440-30':{width:1440,height:2560,fps:30,bitrate:6500000,label:'2K 30 FPS'},
+    '1440-60':{width:1440,height:2560,fps:60,bitrate:8500000,label:'2K 60 FPS'},
+    '2160-30':{width:2160,height:3840,fps:30,bitrate:10000000,label:'4K 30 FPS'},
+    '2160-60':{width:2160,height:3840,fps:60,bitrate:13000000,label:'4K 60 FPS'}
   };
   const q=qualityConfig[String(quality)]||qualityConfig['1080-30'];
   const S=q.width/1080;
+  const isMobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)||Math.min(innerWidth,innerHeight)<820;
+  const lowMemory=Number(navigator.deviceMemory||8)<=4;
 
   let sourceUrl=remoteVideoUrl||video.currentSrc||video.src||video.dataset.lazySrc||'';
   if(sourceUrl && /^https?:\/\//i.test(sourceUrl) && !sourceUrl.startsWith(location.origin)){
@@ -1018,20 +1026,46 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
   }
   if(!sourceUrl) throw new Error('Add a post video first.');
 
-  setStatus(`Preparing ${q.label} turbo export…`);
+  setStatus(`${q.label} export — preparing…`);
   const MB=await loadMediabunny();
   const {Input,ALL_FORMATS,BlobSource,UrlSource,Output,BufferTarget,Mp4OutputFormat,Conversion,Quality}=MB;
   if(!Input||!ALL_FORMATS||!Output||!BufferTarget||!Mp4OutputFormat||!Conversion) throw new Error('Fast exporter could not initialize.');
 
+  // Mobile browsers pay a large penalty when a long video is read through many HTTP
+  // range requests. Download it once into memory, then decode locally from a BlobSource.
+  // Desktop keeps the range-streaming source to avoid a large up-front memory spike.
+  let input;
+  const perf={started:performance.now()};
+  try{
+    if(/^blob:/i.test(sourceUrl)){
+      const blob=await fetch(sourceUrl).then(r=>{if(!r.ok)throw new Error('Could not read uploaded video.');return r.blob()});
+      input=new Input({formats:ALL_FORMATS,source:new BlobSource(blob)});
+    }else if(isMobile){
+      setStatus(`${q.label} export — downloading source once for faster mobile processing…`);
+      const res=await fetch(sourceUrl,{cache:'force-cache'});
+      if(!res.ok) throw new Error(`Could not download source video (${res.status}).`);
+      const blob=await res.blob();
+      perf.sourceDownloaded=performance.now();
+      input=new Input({formats:ALL_FORMATS,source:new BlobSource(blob)});
+    }else{
+      const absolute=new URL(sourceUrl,location.href).href;
+      input=new Input({formats:ALL_FORMATS,source:new UrlSource(absolute,{parallelism:8,maxCacheSize:128*1024*1024})});
+    }
+  }catch(err){throw new Error(`Could not open the video: ${err.message||err}`)}
+
   let canvas,ctx,staticCanvas,staticCtx;
   try{
-    canvas=document.createElement('canvas'); canvas.width=q.width; canvas.height=q.height;
-    ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
-    staticCanvas=document.createElement('canvas'); staticCanvas.width=q.width; staticCanvas.height=q.height;
-    staticCtx=staticCanvas.getContext('2d',{alpha:false,desynchronized:true});
+    // OffscreenCanvas avoids some mobile DOM-canvas overhead. Fall back to regular
+    // canvases for browsers that do not implement it.
+    const useOffscreen=typeof OffscreenCanvas==='function';
+    canvas=useOffscreen?new OffscreenCanvas(q.width,q.height):document.createElement('canvas');
+    staticCanvas=useOffscreen?new OffscreenCanvas(q.width,q.height):document.createElement('canvas');
+    if(!useOffscreen){canvas.width=q.width;canvas.height=q.height;staticCanvas.width=q.width;staticCanvas.height=q.height;}
+    ctx=canvas.getContext('2d',{alpha:false,desynchronized:true,willReadFrequently:false});
+    staticCtx=staticCanvas.getContext('2d',{alpha:false,desynchronized:true,willReadFrequently:false});
   }catch{ throw new Error(`Could not allocate ${q.label}. Try a lower quality.`); }
   if(!ctx||!staticCtx) throw new Error('The browser could not create the export canvas.');
-  ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
+  ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality=isMobile?'medium':'high';
   staticCtx.imageSmoothingEnabled=true; staticCtx.imageSmoothingQuality='high';
 
   staticCtx.save(); staticCtx.scale(S,S);
@@ -1042,26 +1076,11 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
     staticCtx.clearRect(0,0,q.width,q.height);
     staticCtx.save(); staticCtx.scale(S,S); reelDrawFrame(staticCtx,staticCanvas,null,data,textLayout,false,designId); staticCtx.restore();
   }
-  ctx.drawImage(staticCanvas,0,0);
 
-  const fs=textLayout.fontSize;
-  const lineH=fs*1.18;
-  const lineCount=textLayout.linesDetailed.length;
-  const textBottomY=370+Math.max(0,lineCount-1)*lineH;
-  const videoY=Math.min(850,Math.max(620,textBottomY+32));
-  const videoH=Math.min(760,Math.max(460,1550-videoY));
-  const videoX=64,videoW=760;
-
-  let input;
-  try{
-    if(/^blob:/i.test(sourceUrl)){
-      const blob=await fetch(sourceUrl).then(r=>{if(!r.ok)throw new Error('Could not read uploaded video.');return r.blob()});
-      input=new Input({formats:ALL_FORMATS,source:new BlobSource(blob)});
-    }else{
-      const absolute=new URL(sourceUrl,location.href).href;
-      input=new Input({formats:ALL_FORMATS,source:new UrlSource(absolute,{parallelism:6,maxCacheSize:64*1024*1024})});
-    }
-  }catch(err){throw new Error(`Could not open the video: ${err.message||err}`)}
+  const rg=reelVideoGeometry(textLayout,designId);
+  const videoY=rg.y,videoH=rg.h;
+  const videoX=rg.x,videoW=rg.w;
+  const outVideoX=videoX*S,outVideoY=videoY*S,outVideoW=videoW*S,outVideoH=videoH*S,outRadius=18*S;
 
   try{
     if(!(await input.canRead())) throw new Error('The video format is not supported by this browser.');
@@ -1069,6 +1088,10 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
     if(!vtrack) throw new Error('The selected video has no video track.');
     const sourceDuration=await vtrack.getDurationFromMetadata();
     const duration=(Number.isFinite(sourceDuration)&&sourceDuration>0)?sourceDuration:0;
+
+    // Reuse the pre-rendered static layer. Only the video rectangle changes per frame.
+    ctx.clearRect(0,0,q.width,q.height);
+    ctx.drawImage(staticCanvas,0,0);
 
     const output=new Output({format:new Mp4OutputFormat(),target:new BufferTarget()});
     const conversion=await Conversion.init({
@@ -1079,12 +1102,12 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
         quality:new Quality({bitrate:q.bitrate}),
         hardwareAcceleration:'prefer-hardware',
         latencyMode:'realtime',
-        keyFrameInterval:10,
+        keyFrameInterval:20,
         forceTranscode:true,
         processedWidth:q.width,
         processedHeight:q.height,
         process:(sample)=>{
-          ctx.clearRect(0,0,q.width,q.height);
+          // Keeping the base layer opaque avoids an expensive full-canvas clear.
           ctx.drawImage(staticCanvas,0,0);
           const sw=sample.displayWidth||sample.codedWidth;
           const sh=sample.displayHeight||sample.codedHeight;
@@ -1092,7 +1115,7 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
           const dw=sw*fit, dh=sh*fit;
           const dx=videoX+(videoW-dw)/2, dy=videoY+(videoH-dh)/2;
           ctx.save();
-          ctx.beginPath(); ctx.roundRect(videoX*S,videoY*S,videoW*S,videoH*S,18*S); ctx.clip();
+          ctx.beginPath();ctx.roundRect(outVideoX,outVideoY,outVideoW,outVideoH,outRadius);ctx.clip();
           sample.draw(ctx,dx*S,dy*S,dw*S,dh*S);
           ctx.restore();
           return canvas;
@@ -1101,15 +1124,12 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
       trim:{start:0,end:duration}
     });
     if(!conversion.isValid) throw new Error('Fast hardware export is unavailable in this browser.');
-
-    // Avoid interval polling during the hot export path; progress updates themselves
-    // can add measurable main-thread work on lower-end phones.
     conversion.onProgress=(progress)=>{
       const pct=Math.min(99,Math.max(0,Math.round(progress*100)));
-      setStatus(`${q.label} turbo export… ${pct}%`);
+      setStatus(`${q.label} export — ${pct}%${isMobile?' · mobile optimized':''}`);
     };
     const started=performance.now();
-    setStatus(`${q.label} turbo export… 0% (full length)`);
+    setStatus(`${q.label} export — 0%${isMobile?' · mobile optimized':''}`);
     await conversion.execute();
     const buffer=output.target.buffer;
     if(!buffer||!buffer.byteLength) throw new Error('The browser produced an empty Reel.');
@@ -1117,13 +1137,13 @@ async function exportReel(card, video, data, units, textLayout, designId, remote
     const filename=`tweetstudio-reel-${designId}-${q.label.toLowerCase().replace(/\s+/g,'-')}.mp4`;
     await downloadBlob(blob,filename);
     const elapsed=Math.round((performance.now()-started)/1000);
-    setStatus(`${q.label} Reel ready — exported in ${elapsed}s.`);
-    trackEvent('reel_downloaded',{format:'mp4',mode:'webcodecs_fps',quality:q.label,width:q.width,height:q.height,fps:q.fps,duration:Math.round(duration*100)/100,size:blob.size,elapsed});
+    const totalElapsed=Math.round((performance.now()-perf.started)/1000);
+    setStatus(`${q.label} Reel ready — ${totalElapsed}s total.`);
+    trackEvent('reel_downloaded',{format:'mp4',mode:'webcodecs_mobile_optimized',mobile:isMobile,lowMemory,width:q.width,height:q.height,fps:q.fps,duration:Math.round(duration*100)/100,size:blob.size,elapsed,totalElapsed,sourceDownloadSeconds:perf.sourceDownloaded?Math.round((perf.sourceDownloaded-perf.started)/1000):0});
   }finally{
     try{input?.dispose?.()}catch{}
   }
 }
-
 function render(id,data,units,idx,total){
   const cfg=TEMPLATES.find(t=>t.id===id).cfg;
   const layout=fitText(units,cfg);
