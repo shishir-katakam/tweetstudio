@@ -1,0 +1,11 @@
+name = "tweetstudio-public-stats"
+main = "worker.js"
+compatibility_date = "2026-08-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tweetstudio-stats"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Route this worker on your Cloudflare-hosted TweetStudio domain:
+# routes = [{ pattern = "endiidishishir.qzz.io/api/stats/*", zone_name = "endiidishishir.qzz.io" }]

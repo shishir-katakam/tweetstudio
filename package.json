@@ -1,19 +1,10 @@
 {
   "name": "tweetstudio",
   "version": "1.0.0",
-  "description": "Tweet to Instagram Generator",
+  "private": true,
+  "description": "TweetStudio server",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
-  },
-  "keywords": [
-    "tweet",
-    "instagram",
-    "converter"
-  ],
-  "author": "",
-  "license": "MIT",
-  "dependencies": {
-    "@vercel/analytics": "^2.0.1"
+    "start": "node server.js"
   }
 }
