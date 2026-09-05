@@ -82,28 +82,63 @@ async function handleTweet(req,res,parsed){
   const avatar=(a.avatar_url || a.avatar || '').replace('_normal','_400x400');
 
   const mediaObj=root.media || {};
-  const allMedia=Array.isArray(mediaObj.all) ? mediaObj.all : [];
-  let media=[];
-  if(allMedia.length){
-    media=allMedia.map(m=>({
-      url:m.type==='video'||m.type==='gif' ? (m.thumbnail_url||m.url) : m.url,
-      videoUrl:m.type==='video'||m.type==='gif' ? (m.url||m.transcode_url||m.formats?.find?.(f=>f.container==='mp4')?.url||'') : '',
-      width:m.width,
-      height:m.height,
-      duration:m.duration,
-      type:m.type||'photo'
-    })).filter(m=>m.url);
-  }else{
-    const photos=Array.isArray(mediaObj.photos)?mediaObj.photos:[];
-    const videos=Array.isArray(mediaObj.videos)?mediaObj.videos:[];
-    const external=mediaObj.external?[mediaObj.external]:[];
-    media=[
-      ...photos.map(p=>({url:p.url,width:p.width,height:p.height,type:p.type||'photo'})),
-      ...videos.map(v=>({url:v.thumbnail_url||v.url,videoUrl:v.url||v.transcode_url||v.formats?.find?.(f=>f.container==='mp4')?.url||'',width:v.width,height:v.height,duration:v.duration,type:v.type||'video'})),
-      ...external.map(v=>({url:v.thumbnail_url||v.url,videoUrl:v.url||'',width:v.width,height:v.height,duration:v.duration,type:v.type||'video'}))
-    ].filter(m=>m.url);
-  }
+  const chooseVideoUrl=(m={})=>{
+    let formats=Array.isArray(m.formats)?m.formats:[];
+    if(formats && !Array.isArray(formats) && typeof formats==='object') formats=Object.values(formats);
+    const mp4=formats.filter(f=>f && String(f.container||'').toLowerCase()==='mp4' && f.url);
+    // Prefer the best available resolution, but avoid unnecessarily huge
+    // bitrate variants. Reel output is 1080x1920, so a <=6 Mbps source is
+    // normally more than enough and downloads substantially faster.
+    mp4.sort((a,b)=>{
+      const ar=(Number(a.width)||0)*(Number(a.height)||0), br=(Number(b.width)||0)*(Number(b.height)||0);
+      if(ar!==br) return br-ar;
+      const ab=Number(a.bitrate)||0, bb=Number(b.bitrate)||0;
+      const at=ab>6000000?ab-6000000:0, bt=bb>6000000?bb-6000000:0;
+      return at-bt || ab-bb;
+    });
+    const legacyVariants=Array.isArray(m.video_info?.variants)?m.video_info.variants:[];
+    const legacyMp4=legacyVariants.filter(v=>v?.url && /\.mp4(?:$|[?#])/i.test(v.url));
+    legacyMp4.sort((a,b)=>(Number(b.bitrate)||0)-(Number(a.bitrate)||0));
+    return String(mp4[0]?.url || legacyMp4[0]?.url || m.url || m.transcode_url || m.media_url_https || '').trim();
+  };
+  const normalizeMedia=(m)=>{
+    if(!m) return null;
+    const type=String(m.type||'').toLowerCase();
+    const isVideo=type==='video'||type==='gif'||type==='animated_gif';
+    const videoUrl=isVideo?chooseVideoUrl(m):'';
+    const url=String(m.thumbnail_url || (isVideo ? videoUrl : m.url) || '').trim();
+    if(!url && !videoUrl) return null;
+    return {
+      url:url||videoUrl,
+      videoUrl,
+      width:Number(m.width||m.original_info?.width||0)||undefined,
+      height:Number(m.height||m.original_info?.height||0)||undefined,
+      duration:Number(m.duration||0)||undefined,
+      type:isVideo?'video':(type||'photo')
+    };
+  };
 
+  // FxTwitter v2 exposes videos in `media.videos`, while `media.all` is a
+  // convenience collection whose shape has changed across API revisions.
+  // Prefer the dedicated video array so we never mistake a thumbnail/photo
+  // URL for the playable MP4. Keep `all` as a fallback for older responses.
+  const videos=Array.isArray(mediaObj.videos)?mediaObj.videos:[];
+  const photos=Array.isArray(mediaObj.photos)?mediaObj.photos:[];
+  const allMedia=Array.isArray(mediaObj.all)?mediaObj.all:[];
+  const external=mediaObj.external?[mediaObj.external]:[];
+  // Compatibility with older/alternate FxTwitter payloads.
+  const legacyEntities=Array.isArray(root.extended_entities?.media)?root.extended_entities.media:[];
+  const legacyEntities2=Array.isArray(root.entities?.media)?root.entities.media:[];
+  const normalizedVideos=videos.map(normalizeMedia).filter(m=>m?.videoUrl);
+  const normalizedAll=allMedia.map(normalizeMedia).filter(Boolean);
+  const normalizedPhotos=photos.map(normalizeMedia).filter(Boolean);
+  const normalizedExternal=external.map(normalizeMedia).filter(m=>m?.videoUrl);
+  const normalizedLegacy=legacyEntities.concat(legacyEntities2).map(normalizeMedia).filter(m=>m?.videoUrl);
+
+  // Keep one canonical media array, with real playable video URLs first.
+  // This makes the Reel composer resilient to FxTwitter response variants.
+  const media=[...normalizedVideos,...normalizedExternal,...normalizedLegacy,...normalizedAll,...normalizedPhotos]
+    .filter((m,i,a)=>m && (m.videoUrl || m.url) && i===a.findIndex(x=>x.videoUrl===m.videoUrl && x.url===m.url));
   const avatarData=await remoteDataUrl(avatar);
   const out={
     url:root.url||`https://x.com/${q.handle}/status/${q.id}`,
