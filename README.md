@@ -1,4 +1,4 @@
-# TweetStudio v84
+# TweetStudio
 
 This version restores normal frame rates instead of the ultra-low-FPS turbo profiles. Reel download quality selection now offers 1080p, 2K and 4K at both 30 FPS and 60 FPS.
 
