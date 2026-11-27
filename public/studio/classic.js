@@ -1,0 +1,1658 @@
+
+let tweet=null;
+let results=[];
+
+// Four core reference templates + four experimental Gen-Z styles.
+const TEMPLATES=[
+  {id:'blue',name:'Blue Card',desc:'Clean social card',color:'#28a2e8',cfg:{c:50,f:31,lh:1.28,min:20,textTop:372,textH:560,paraGap:.72,density:.93,maxW:748,font:'Inter',weight:500}},
+  {id:'purple',name:'Purple Minimal',desc:'Soft-focus logo + type',color:'#3a226c',cfg:{c:51,f:30,lh:1.30,min:20,textTop:208,textH:566,paraGap:.72,density:.93,maxW:900,font:'Inter',weight:700}},
+  {id:'highlight',name:'Editorial Highlight',desc:'Serif + yellow highlights',color:'#fffef8',cfg:{c:51,f:29,lh:1.17,min:19,textTop:114,textH:706,paraGap:.58,density:.94,maxW:900,font:'Playfair Display',weight:500}},
+  {id:'darkHighlight',name:'Editorial Highlight — Dark',desc:'Black background + yellow highlights',color:'#050505',cfg:{c:51,f:29,lh:1.17,min:19,textTop:114,textH:706,paraGap:.58,density:.94,maxW:900,font:'Playfair Display',weight:500}},
+  {id:'selective',name:'Selective Editorial',desc:'Black serif + key-claim highlights',color:'#fffef8',cfg:{c:52,f:29,lh:1.18,min:19,textTop:122,textH:698,paraGap:.62,density:.94,maxW:930,font:'Playfair Display',weight:500}},
+  {id:'darkSelective',name:'Selective Editorial — Dark',desc:'Black background + yellow key-claim highlights',color:'#050505',cfg:{c:52,f:29,lh:1.18,min:19,textTop:122,textH:698,paraGap:.62,density:.94,maxW:930,font:'Playfair Display',weight:500}},
+  {id:'darkLimeSelective',name:'Selective Editorial — Neon Lime',desc:'Black background + neon lime key-claim highlights',color:'#050505',cfg:{c:52,f:29,lh:1.18,min:19,textTop:122,textH:698,paraGap:.62,density:.94,maxW:930,font:'Playfair Display',weight:500}},
+  {id:'black',name:'Black Minimal',desc:'High-contrast modern',color:'#050505',cfg:{c:56,f:31,lh:1.34,min:20,textTop:300,textH:664,paraGap:.82,density:.92,maxW:900,font:'Inter',weight:500}},
+  {id:'acid',name:'Acid Poster',desc:'Neon lime + black maximal',color:'#39FF14',cfg:{c:55,f:32,lh:1.18,min:20,textTop:270,textH:525,paraGap:.62,density:.92,maxW:860,font:'Inter',weight:700}},
+  {id:'hyper',name:'Hyper Pop',desc:'Electric blue + hot pink',color:'#4B00FF',cfg:{c:56,f:31,lh:1.14,min:20,textTop:250,textH:628,paraGap:.62,density:.92,maxW:870,font:'Inter',weight:700}},
+  {id:'sunset',name:'Sunset Collage',desc:'Coral + cyan editorial',color:'#FF5E78',cfg:{c:56,f:30,lh:1.18,min:19,textTop:250,textH:566,paraGap:.66,density:.92,maxW:850,font:'Playfair Display',weight:600}},
+  {id:'cyber',name:'Cyber Glass',desc:'Chrome, cyan & magenta',color:'#00F0FF',cfg:{c:56,f:30,lh:1.20,min:19,textTop:334,textH:570,paraGap:.68,density:.92,maxW:900,font:'Inter',weight:600}}
+];
+const selected=new Set(TEMPLATES.map(t=>t.id));
+
+function esc(s){return String(s??'').replace(/[<>&'\"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','\"':'&quot;'}[c]));}
+function wrap(s,n){const words=String(s||'').split(/\s+/).filter(Boolean),out=[];let line='';for(const w of words){const nx=line?line+' '+w:w;if(nx.length>n&&line){out.push(line);line=w}else line=nx}if(line)out.push(line);return out}
+
+// Treat paragraphs and bullet items as atomic content units. We never split a normal
+// paragraph between slides. A slide is formed by packing complete units.
+function segments(text){
+  const blocks=String(text||'').replace(/\r\n/g,'\n').split(/\n{2,}/).map(s=>s.trim()).filter(Boolean);
+  const out=[];
+  for(const block of blocks){
+    const lines=block.split('\n').map(s=>s.trim()).filter(Boolean);
+    if(lines.length>1 && lines.every(x=>/^([➤•▪◦*]|\d+[.)])\s+/.test(x))){
+      lines.forEach(x=>out.push({text:x,kind:'bullet'}));
+      continue;
+    }
+    if(lines.length>1 && /^(Key takeaways:|Other model details:)$/i.test(lines[0])){
+      out.push({text:lines[0],kind:'heading'});
+      lines.slice(1).forEach(x=>out.push({text:x,kind:/^[➤•▪◦*]/.test(x)?'bullet':'paragraph'}));
+      continue;
+    }
+    out.push({text:lines.join('\n'),kind:'paragraph'});
+  }
+  return out;
+}
+function wrapMeasured(text,maxWidth,fontFamily,fontSize,fontWeight=500){
+  const raw=String(text||'');
+  const lines=[];
+  for(const rawLine of raw.split('\n')){
+    const words=rawLine.trim().split(/\s+/).filter(Boolean);
+    if(!words.length){ lines.push(''); continue; }
+    let line=words[0];
+    for(let i=1;i<words.length;i++) {
+      const candidate=line+' '+words[i];
+      if(measureTextWidth(candidate,fontFamily,fontSize,fontWeight)<=maxWidth){
+        line=candidate;
+      }else{
+        lines.push(line);
+        line=words[i];
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+function fontMetrics(cfg,fontSize=cfg.f){
+  return {font:cfg.font||'Inter',weight:cfg.weight||500,maxW:cfg.maxW||900,size:fontSize};
+}
+function estimateLines(text,cfg,fontSize=cfg.f){
+  const m=fontMetrics(cfg,fontSize);
+  return wrapMeasured(text,m.maxW,m.font,m.size,m.weight).length;
+}
+function sentenceSpans(text){
+  const t=String(text||'');
+  const spans=[]; let start=0;
+  const isBoundary=(i)=>{
+    const ch=t[i];
+    if(!'.!?'.includes(ch)) return false;
+    const next=t.slice(i+1).match(/\S/);
+    if(!next) return true;
+    const nextPos=i+1+next.index;
+    const prev=t[i-1]||'';
+    // Decimal/model-version periods (4.6, 5.6, v2.1, etc.) are never boundaries.
+    if(/\d/.test(prev) && /\d/.test(t[i+1]||'')) return false;
+    if(ch==='.' && /[A-Za-z]\.[A-Za-z]/.test(t.slice(Math.max(0,i-2),Math.min(t.length,i+3)))) return false;
+    // Boundary is expected before another sentence, bullet, mention or closing punctuation.
+    return /^[A-Z0-9@➤•▪◦]/.test(t[nextPos]) || /[.!?)]$/.test(t.slice(i+1,nextPos));
+  };
+  for(let i=0;i<t.length;i++){
+    if(isBoundary(i)){
+      const e=i+1;
+      if(t.slice(start,e).trim()) spans.push({text:t.slice(start,e).trim(),kind:'sentence'});
+      while(start<t.length && /\s/.test(t[start])) start++;
+    }
+  }
+  if(start<t.length && t.slice(start).trim()) spans.push({text:t.slice(start).trim(),kind:'sentence'});
+  return spans.length?spans:[{text:t,kind:'sentence'}];
+}
+function unitHeight(unit,cfg,fontSize=cfg.f){
+  const lines=estimateLines(unit.text,cfg,fontSize);
+  const base=lines*fontSize*cfg.lh;
+  const gap=(unit.kind==='heading'?0.28:(unit.kind==='bullet'?0.42:cfg.paraGap))*fontSize;
+  return base+gap;
+}
+function pageCapacity(cfg,density){
+  const densityScale=density==='compact'?1.04:density==='airy'?.88:1;
+  return cfg.textH*cfg.density*densityScale;
+}
+function paginate(text,cfg,density){
+  const raw=segments(text);
+  const cap=pageCapacity(cfg,density);
+  const units=[];
+
+  // First, split only paragraphs that are too large to fit on their own. A paragraph
+  // remains intact whenever possible. Decimal/model-version periods such as 4.6 and
+  // 5.6 are ignored by sentenceSpans().
+  for(const unit of raw){
+    if(unit.kind==='paragraph' && unitHeight(unit,cfg,cfg.f)>cap){
+      const sentences=sentenceSpans(unit.text);
+      let group='', groupH=0;
+      for(const sent of sentences){
+        const candidate=group?group+' '+sent.text:sent.text;
+        const h=unitHeight({text:candidate,kind:'paragraph'},cfg,cfg.f);
+        if(group && groupH+h>cap){
+          units.push({text:group,kind:'paragraph'});
+          group=sent.text;
+          groupH=unitHeight({text:group,kind:'paragraph'},cfg,cfg.f);
+        }else{
+          group=candidate; groupH=h;
+        }
+      }
+      if(group) units.push({text:group,kind:'paragraph'});
+    }else{
+      units.push(unit);
+    }
+  }
+
+  // A heading such as “Key takeaways:” should never be stranded at the bottom of a
+  // slide while its first bullet starts on the next slide. Bundle a heading with its
+  // first following content unit. This bundle is still ordinary text for rendering,
+  // so all templates receive the same pagination behavior.
+  const bundled=[];
+  for(let i=0;i<units.length;i++){
+    const unit=units[i];
+    if(unit.kind==='heading' && i+1<units.length){
+      const next=units[i+1];
+      bundled.push({
+        text:unit.text+'\n\n'+next.text,
+        kind:'paragraph'
+      });
+      i++;
+    }else{
+      bundled.push(unit);
+    }
+  }
+
+  const pages=[]; let current=[],used=0;
+  const commit=()=>{if(current.length){pages.push(current.slice());current=[];used=0;}};
+
+  for(const unit of bundled){
+    const h=unitHeight(unit,cfg,cfg.f);
+    const gap=current.length ? cfg.f*cfg.paraGap : 0;
+
+    // If a heading bundle would not fit on the current page, start it on the next page.
+    // This prevents tiny orphan sections and keeps short paragraphs/bullets together.
+    if(current.length && used+gap+h>cap) commit();
+    current.push(unit);
+    used += (current.length>1?gap:0)+h;
+  }
+  commit();
+
+  // Safety rebalance: if a final page is only a tiny heading/content fragment and the
+  // previous page has meaningful spare room, move the whole unit back. This is applied
+  // only when the combined base-height is actually within capacity.
+  if(pages.length>1){
+    const last=pages[pages.length-1];
+    const prev=pages[pages.length-2];
+    if(last.length===1 && prev.length){
+      const candidate=prev.concat(last);
+      const total=candidate.reduce((sum,u,idx)=>sum+unitHeight(u,cfg,cfg.f)+(idx?cfg.f*cfg.paraGap:0),0);
+      if(total<=cap){
+        pages[pages.length-2]=candidate;
+        pages.pop();
+      }
+    }
+  }
+
+  return pages.length?pages:[[{text:'',kind:'paragraph'}]];
+}
+function pageText(units){return units.map(u=>u.text).join('\n\n')}
+
+function fitText(units,cfg){
+  const text=pageText(units);
+  let fs=cfg.f;
+  const cap=cfg.textH*cfg.density;
+  let height=units.reduce((sum,u,idx)=>sum+unitHeight(u,cfg,fs)+(idx?fs*cfg.paraGap:0),0);
+  if(height>cap){
+    const scale=Math.sqrt(cap/height);
+    fs=Math.max(cfg.min,Math.floor(cfg.f*scale));
+    height=units.reduce((sum,u,idx)=>sum+unitHeight(u,cfg,fs)+(idx?fs*cfg.paraGap:0),0);
+  }
+  const m=fontMetrics(cfg,fs);
+  const wrapped=[];
+  units.forEach((u,ui)=>{
+    const ls=wrapMeasured(u.text,m.maxW,m.font,fs,m.weight);
+    if(ui>0) wrapped.push('');
+    wrapped.push(...ls);
+  });
+  return {fontSize:fs,lines:wrapped,lineHeight:cfg.lh};
+}
+
+function txt(lines,x,y,fs,lh,fill,font,weight=500,anchor='start'){
+  return lines.map((l,i)=>`<text x="${x}" y="${y+i*fs*lh}" font-family="${font}" font-size="${fs}px" font-weight="${weight}" fill="${fill}" text-anchor="${anchor}">${esc(l||' ')}</text>`).join('');
+}
+function av(data,cx,cy,r,clip){
+  const href=data.avatar||'';
+  return `<defs><clipPath id="${clip}"><circle cx="${cx}" cy="${cy}" r="${r}"/></clipPath></defs><circle cx="${cx}" cy="${cy}" r="${r}" fill="#813cff"/><image href="${esc(href)}" x="${cx-r}" y="${cy-r}" width="${r*2}" height="${r*2}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clip})"/>`;
+}
+function author(data,x,y,dark=false,scale=1){
+  const name=esc(data.authorName||'Unknown account');
+  const handle=esc(data.handle||'@unknown');
+  return `${av(data,x+34*scale,y+34*scale,34*scale,'av'+Math.round(x)+Math.round(y))}<text x="${x+84*scale}" y="${y+30*scale}" font-family="Inter" font-size="${29*scale}px" font-weight="800" fill="${dark?'#fff':'#111'}">${name}</text><text x="${x+84*scale}" y="${y+60*scale}" font-family="Inter" font-size="${24*scale}px" fill="${dark?'#c3c5cb':'#70757d'}">${handle}</text>`;
+}
+function progress(idx,total,fill='#888'){return total>1?`<text x="1010" y="1038" text-anchor="end" font-family="Inter" font-size="18" fill="${fill}">${idx+1} / ${total}</text>`:''}
+function measureTextWidth(text,fontFamily,fontSize,fontWeight=500){
+  if(!window.__measureCanvas) window.__measureCanvas=document.createElement('canvas');
+  const ctx=window.__measureCanvas.getContext('2d');
+  ctx.font=`${fontWeight} ${fontSize}px \"${fontFamily}\"`;
+  return ctx.measureText(text).width;
+}
+function measureSvgTextWidth(text,fontFamily,fontSize,fontWeight=500){
+  // Measure the exact rendered SVG glyph bounds after webfonts are loaded.
+  // getBBox() is preferable here because the highlight must behave like a
+  // real text selection: it must cover every visible glyph, including the
+  // final character, with only a tiny breathing room around it.
+  if(!document.body) return measureTextWidth(text,fontFamily,fontSize,fontWeight);
+  if(!window.__measureSvg){
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('width','2'); svg.setAttribute('height','2');
+    svg.style.position='fixed'; svg.style.left='-10000px'; svg.style.top='-10000px';
+    svg.style.visibility='hidden'; svg.style.pointerEvents='none';
+    svg.style.overflow='visible';
+    document.body.appendChild(svg);
+    window.__measureSvg=svg;
+  }
+  const svg=window.__measureSvg;
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+  t.setAttribute('x','0'); t.setAttribute('y',String(fontSize));
+  t.setAttribute('font-family',fontFamily);
+  t.setAttribute('font-size',String(fontSize));
+  t.setAttribute('font-weight',String(fontWeight));
+  t.setAttribute('xml:space','preserve');
+  t.textContent=text;
+  svg.appendChild(t);
+  try{
+    const box=t.getBBox();
+    if(Number.isFinite(box.width) && box.width>0) return box.width;
+  }catch{}
+  try{
+    const width=t.getComputedTextLength();
+    if(Number.isFinite(width) && width>0) return width;
+  }catch{}
+  return measureTextWidth(text,fontFamily,fontSize,fontWeight);
+}
+
+// Identify the meaningful outcome/comparison clauses rather than highlighting
+// model names merely because they occur in the sentence. This is deterministic
+// and intentionally favors claims such as “beats GPT-…”, “scores …”, “costs …”,
+// “behind only …”, “ahead of …”, and similar result-bearing language.
+function modelAnchors(text){
+  const t=String(text||'');
+  // Match the actual model/entity name without swallowing ordinary prose after it.
+  // In particular, do not consume words after a colon/dash such as
+  // “GLM-5.3: Built to Code”.
+  const patterns=[
+    /\b(?:Gemini|Grok|Claude|GPT|Qwen|Kimi|Llama|DeepSeek|Mistral|Muse|Terra|Spark|Opus|Fable|Sonnet|Haiku|Flash|Nova|Titan|Lumen|Orion|Sage|Astra)\s*[A-Za-z0-9.-]*(?:\s+(?:Flash|Pro|Max|Ultra|Mini|Nano|Opus|Sonnet|Haiku|Terra|Spark))?(?:\s*\([^)\n]{1,24}\))?/gi,
+    /\b[A-Z][A-Za-z0-9.-]{1,24}\s*\d+(?:\.\d+){0,2}(?:\s+(?:Flash|Pro|Max|Ultra|Mini|Nano|Terra|Spark))?(?:\s*\([^)\n]{1,24}\))?/g
+  ];
+  const found=[];
+  for(const re of patterns){
+    re.lastIndex=0; let m;
+    while((m=re.exec(t))){
+      const raw=m[0];
+      const lead=(raw.match(/^\s*/)||[''])[0].length;
+      const trail=(raw.match(/\s*$/)||[''])[0].length;
+      const start=m.index+lead;
+      const end=m.index+raw.length-trail;
+      const phrase=t.slice(start,end);
+      if(phrase.length<3) continue;
+      found.push({start,end,phrase});
+    }
+  }
+  found.sort((a,b)=>a.start-b.start || (b.end-b.start)-(a.end-a.start));
+  const out=[];
+  for(const r of found){
+    const overlap=out.find(x=>r.start<x.end && r.end>x.start);
+    if(overlap){
+      if((r.end-r.start)>(overlap.end-overlap.start)) Object.assign(overlap,r);
+    }else out.push({...r});
+  }
+  return out;
+}
+function insideParens(t,i){
+  let d=0;
+  for(let k=0;k<i;k++){ if(t[k]==='(') d++; else if(t[k]===')') d=Math.max(0,d-1); }
+  return d>0;
+}
+function sentencePunct(t,i){
+  const ch=t[i];
+  if(ch==='!'||ch==='?'||ch==='\n') return true;
+  if(ch!=='.') return false;
+  // Decimal/version points and common abbreviations are not sentence boundaries.
+  const before=t[i-1]||'', after=t[i+1]||'';
+  if(/\d/.test(before) && /\d/.test(after)) return false;
+  const prefix=t.slice(Math.max(0,i-3),i+1).toLowerCase();
+  if(prefix.endsWith('vs.')||prefix.endsWith('e.g.')||prefix.endsWith('i.e.')) return false;
+  return true;
+}
+function sentenceBounds(text,index){
+  const t=String(text||''); let a=index,b=index;
+  while(a>0 && !sentencePunct(t,a-1)) a--;
+  while(b<t.length && !sentencePunct(t,b)) b++;
+  return {start:a,end:b};
+}
+function clausePunct(t,i){
+  const ch=t[i];
+  if((ch===','||ch===';'||ch===':') && insideParens(t,i)) return false;
+  if(ch===','||ch===';'||ch===':'||ch==='\n') return true;
+  return sentencePunct(t,i);
+}
+function clauseBounds(text,index){
+  const t=String(text||''); let a=index,b=index;
+  while(a>0 && !clausePunct(t,a-1)) a--;
+  while(b<t.length && !clausePunct(t,b)) b++;
+  return {start:a,end:b};
+}
+
+// Find meaningful result-bearing spans by attaching the claim to its nearby model/entity.
+// This avoids useless highlights such as only “Pareto frontier” or only a model name.
+function importanceRanges(text){
+  const t=String(text||'');
+  const ranges=[];
+  const modelRe=/\b(?:Gemini|Grok|Claude|GPT|Qwen|Kimi|Llama|DeepSeek|Mistral|Muse|Terra|Spark|Opus|Fable|Sonnet|Haiku|Nova|Titan|Lumen|Orion|Sage|Astra)\s*[A-Za-z0-9.-]*(?:\s+(?:Flash|Pro|Max|Ultra|Mini|Nano|Terra|Spark|Opus|Sonnet|Haiku))?(?:\s*\([^)\n]{1,24}\))?/ig;
+  const triggerRe=/\b(?:beats?|beating|outperform(?:s|ed|ing)?|surpass(?:es|ed|ing)?|exceed(?:s|ed|ing)?|scores?|achieves?|gains?|improv(?:e|es|ed|ing)|reaches?|reaching|costs?|priced at|behind|ahead of|alongside|lower cost|more efficient|top[- ]two|context window|tokens? per task|cost per task|elo|performance|pricing|released|launch(?:ed)?|release|faster|slower|increase(?:s|d)?|decrease(?:s|d)?)\b/ig;
+
+  const sentences=[]; let a=0;
+  for(let i=0;i<t.length;i++){
+    if(sentencePunct(t,i)){
+      const e=i+1;
+      if(t.slice(a,e).trim()) sentences.push({start:a,end:e});
+      a=e;
+    }
+  }
+  if(a<t.length && t.slice(a).trim()) sentences.push({start:a,end:t.length});
+
+  for(const sent of sentences){
+    const st=t.slice(sent.start,sent.end);
+    const models=[]; let m;
+    modelRe.lastIndex=0;
+    while((m=modelRe.exec(st))){
+      const raw=m[0];
+      const lead=(raw.match(/^\s*/)||[''])[0].length;
+      const trail=(raw.match(/\s*$/)||[''])[0].length;
+      const start=sent.start+m.index+lead;
+      const end=sent.start+m.index+raw.length-trail;
+      if(end-start>=3) models.push({start,end});
+    }
+    const triggers=[];
+    triggerRe.lastIndex=0;
+    while((m=triggerRe.exec(st))) triggers.push({start:sent.start+m.index,end:sent.start+m.index+m[0].length,word:m[0].toLowerCase()});
+    if(!triggers.length) continue;
+
+    const strong=triggers.filter(x=>/beats?|beating|scores?|achieves?|gains?|improv|reaches?|reaching|costs?|performance|faster|slower|released|launch|increase|decrease/i.test(x.word));
+    const trigger=strong[0] || triggers[0];
+
+    // Prefer the first model that occurs before the meaningful result verb.
+    // Do not allow later competitor models to become the subject of the claim.
+    const primary=models.find(m=>m.end<=trigger.start+2) || models[0];
+
+    let start=primary ? primary.start : trigger.start;
+    let end;
+    if(primary){
+      // Extend only through the current result-bearing clause. Never absorb a
+      // colon/dash continuation such as “GLM-5.3: Built to Code”.
+      const triggerEnd=trigger.end;
+      const cb=clauseBounds(t,trigger.start);
+      end=Math.max(triggerEnd,cb.end);
+      const laterStrong=strong.find(x=>x.start>triggerEnd && x.start<end);
+      if(laterStrong) end=laterStrong.start;
+
+      // If the result clause is excessively long, keep the sentence's key claim compact.
+      if(end-start>220){
+        const windowEnd=Math.min(t.length,start+220);
+        end=windowEnd;
+        const cut=t.slice(start,end).search(/(?:\s+(?:and|while|but|which|that|reinforcing|placing|putting|with|for|on)\s+[^\s]+)$/i);
+        if(cut>60) end=start+cut;
+      }
+    }else{
+      const cb=clauseBounds(t,trigger.start);
+      start=cb.start; end=cb.end;
+    }
+
+    // Trim only boundary whitespace/punctuation. Highlight must begin/end on real glyphs.
+    while(start<end && /\s/.test(t[start])) start++;
+    while(end>start && /\s/.test(t[end-1])) end--;
+    while(end>start && /[,;:]$/.test(t.slice(start,end))) end--;
+
+    const phrase=t.slice(start,end);
+    if(phrase.length>=10){
+      ranges.push({start,end,score:100 + (strong.length?25:0)});
+    }
+  }
+
+  // Fallback for standalone result-heavy text without an identifiable model.
+  if(!ranges.length){
+    const numeric=/\b(?:\d+(?:\.\d+)?%?|\$\d+(?:\.\d+)?(?:\/\w+)?|\b\d{2,4}\b)\b/;
+    const m=numeric.exec(t);
+    if(m){
+      const cb=clauseBounds(t,m.index);
+      let start=cb.start,end=cb.end;
+      while(start<end && /\s/.test(t[start])) start++;
+      while(end>start && /\s/.test(t[end-1])) end--;
+      if(end>start) ranges.push({start,end,score:60});
+    }
+  }
+
+  ranges.sort((a,b)=>b.score-a.score || (a.end-a.start)-(b.end-b.start));
+  return normalizeHighlightRangesForUrls(t, ranges[0] ? [ranges[0]] : []);
+}
+
+function completeUrlSpans(text){
+  const t=String(text||'');
+  const spans=[];
+  // Treat only complete, explicit URLs as atomic. Ellipsized/truncated links are
+  // intentionally excluded so a partial URL is never highlighted by itself.
+  const re=/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
+  let m;
+  while((m=re.exec(t))){
+    let start=m.index, end=m.index+m[0].length;
+    let raw=t.slice(start,end);
+    // Strip sentence punctuation from the URL boundary, but keep URL punctuation
+    // that is legitimately part of the path/query.
+    while(end>start && /[.,!?;:)]$/.test(t[end-1])) end--;
+    const url=t.slice(start,end);
+    if(!url || /\.\.\./.test(url)) continue;
+    // Require a plausible hostname/domain or localhost/IP after the scheme/www.
+    const candidate=url.replace(/^https?:\/\//i,'').replace(/^www\./i,'');
+    const plausible=/^(?:localhost(?::\d+)?|\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?|[^\s./]+\.[A-Za-z]{2,}(?::\d+)?(?:\/|$))/i.test(candidate);
+    if(!plausible) continue;
+    spans.push({start,end});
+    if(re.lastIndex<end) re.lastIndex=end;
+  }
+  return spans;
+}
+
+function normalizeHighlightRangesForUrls(text,ranges){
+  const t=String(text||'');
+  const urls=completeUrlSpans(t);
+  if(!urls.length) return ranges||[];
+  const out=[];
+  for(const r of (ranges||[])){
+    let current={...r};
+    let touched=false;
+    for(const u of urls){
+      if(current.end>u.start && current.start<u.end){
+        // Once a complete URL is selected, the entire URL is selected.
+        current.start=u.start;
+        current.end=u.end;
+        touched=true;
+        break;
+      }
+    }
+    if(touched || current.end>current.start) out.push(current);
+  }
+  return out;
+}
+
+function rangesOverlap(a,b){return !(a.end<=b.start || b.end<=a.start);}
+
+function wrappedRuns(text,maxWidth,fontFamily='Inter',fontSize=31,fontWeight=500){
+  const src=String(text||'');
+  const tokens=[...src.matchAll(/\S+/g)].map(m=>({text:m[0],start:m.index,end:m.index+m[0].length}));
+  const lines=[]; let line=[]; let lineText='';
+  for(const tok of tokens){
+    const candidate=lineText?lineText+' '+tok.text:tok.text;
+    if(line.length && measureTextWidth(candidate,fontFamily,fontSize,fontWeight)>maxWidth){
+      lines.push(line); line=[tok]; lineText=tok.text;
+    }else{ line.push(tok); lineText=candidate; }
+  }
+  if(line.length) lines.push(line);
+  return lines.map(items=>{
+    const start=items[0].start, end=items[items.length-1].end;
+    return {text:src.slice(start,end),start,end};
+  });
+}
+function styledLineSvg(src,line,ranges,x,y,fs,lh,font,weight,normalFill,highlightFill,anchor='start'){
+  const relStart=line.start, relEnd=line.end;
+  const cuts=[relStart,relEnd];
+  ranges.forEach(r=>{
+    if(r.end>relStart && r.start<relEnd){
+      cuts.push(Math.max(relStart,r.start),Math.min(relEnd,r.end));
+    }
+  });
+  const uniq=[...new Set(cuts)].sort((a,b)=>a-b);
+
+  // Render the entire line as one flowing SVG text run. The old implementation
+  // independently positioned each <tspan> and measured its whitespace, which
+  // produced artificial gaps immediately before highlighted phrases. Keeping
+  // the original source string inside one text flow preserves exactly the
+  // source spacing while still allowing individual spans to change color.
+  let out=`<text x="${x}" y="${y}" font-family="${font}" font-size="${fs}" font-weight="${weight}" text-anchor="${anchor}" fill="${normalFill}" xml:space="preserve">`;
+  for(let i=0;i<uniq.length-1;i++){
+    const a=uniq[i], b=uniq[i+1];
+    if(b<=a) continue;
+    const chunk=src.slice(a,b);
+    if(!chunk) continue;
+    const mid=(a+b)/2;
+    const hi=ranges.some(r=>mid>=r.start && mid<r.end);
+    out+=`<tspan fill="${hi?highlightFill:normalFill}">${esc(chunk)}</tspan>`;
+  }
+  return out+'</text>';
+}
+
+
+function selectiveLineSvgColored(src,line,ranges,x,y,fs,font='Playfair Display',weight=500,normalFill='#fff',highlightFill='#ffd600'){
+  const relStart=line.start, relEnd=line.end;
+  const hits=[];
+  for(const r of ranges){
+    if(r.end>relStart && r.start<relEnd){
+      let a=Math.max(relStart,r.start), b=Math.min(relEnd,r.end);
+      while(a<b && /\s/.test(src[a])) a++;
+      while(b>a && /\s/.test(src[b-1])) b--;
+      if(b>a) hits.push({start:a,end:b});
+    }
+  }
+  let out='';
+  for(const h of hits){
+    const prefix=src.slice(relStart,h.start);
+    const seg=src.slice(h.start,h.end);
+    const startW=measureTextWidth(prefix,font,fs,weight);
+    const segW=measureTextWidth(seg,font,fs,weight);
+    const padX=1;
+    const rx=x+startW-padX;
+    const rw=segW+padX*2;
+    const ry=y-fs*0.88;
+    const rh=fs*1.10;
+    out+=`<rect x="${rx.toFixed(2)}" y="${ry.toFixed(2)}" width="${rw.toFixed(2)}" height="${rh.toFixed(2)}" fill="${highlightFill}"/>`;
+  }
+  out+=`<text x="${x}" y="${y}" font-family="${font}" font-size="${fs}" font-weight="${weight}" fill="${normalFill}" xml:space="preserve">`;
+  const cuts=[relStart,relEnd];
+  ranges.forEach(r=>{if(r.end>relStart&&r.start<relEnd){cuts.push(Math.max(relStart,r.start),Math.min(relEnd,r.end));}});
+  const uniq=[...new Set(cuts)].sort((a,b)=>a-b);
+  for(let i=0;i<uniq.length-1;i++){
+    const a=uniq[i],b=uniq[i+1]; if(b<=a) continue;
+    const mid=(a+b)/2;
+    const hi=ranges.some(r=>mid>=r.start&&mid<r.end);
+    // Highlighted text must remain readable: black text on yellow/lime.
+    out+=`<tspan fill="${hi?'#050505':normalFill}">${esc(src.slice(a,b))}</tspan>`;
+  }
+  return out+'</text>';
+}
+
+function selectiveLineSvg(src,line,ranges,x,y,fs,font='Playfair Display',weight=500){
+  const relStart=line.start, relEnd=line.end;
+  const hits=[];
+  for(const r of ranges){
+    if(r.end>relStart && r.start<relEnd){
+      let a=Math.max(relStart,r.start), b=Math.min(relEnd,r.end);
+      // Selection-style highlighting should never include a leading/trailing
+      // whitespace character. Trim only whitespace outside the actual phrase.
+      while(a<b && /\s/.test(src[a])) a++;
+      while(b>a && /\s/.test(src[b-1])) b--;
+      if(b>a) hits.push({start:a,end:b});
+    }
+  }
+  let out='';
+  for(const h of hits){
+    const prefix=src.slice(relStart,h.start);
+    const seg=src.slice(h.start,h.end);
+    const startW=measureTextWidth(prefix,font,fs,weight);
+    const segW=measureTextWidth(seg,font,fs,weight);
+    const padX=1;
+    const rx=x+startW-padX;
+    const rw=segW+padX*2;
+    const ry=y-fs*0.88;
+    const rh=fs*1.10;
+    out+=`<rect x="${rx.toFixed(2)}" y="${ry.toFixed(2)}" width="${rw.toFixed(2)}" height="${rh.toFixed(2)}" fill="#ffd600"/>`;
+  }
+  out+=`<text x="${x}" y="${y}" font-family="${font}" font-size="${fs}" font-weight="${weight}" fill="#111" xml:space="preserve">${esc(line.text)}</text>`;
+  return out;
+}
+
+function reelRenderFont(font){
+  // Reel previews/exports use standalone SVG data URLs. Page-loaded Google fonts
+  // are not reliably available inside those SVG documents, so use deterministic
+  // system fallbacks that are available both to canvas measurement and SVG.
+  return font==='DM Mono' ? 'monospace' : 'Times New Roman';
+}
+function reelTextLayout(text){
+  const maxW=760;
+  // Keep the text and video in two hard-separated regions. The text region is
+  // allowed to shrink progressively for long posts so the final line can NEVER
+  // enter the video rectangle. The same geometry is used by preview and export.
+  const candidates=[42,40,38,36,34,32,30];
+  const lineHeight=1.12;
+  const maxTextBottom=820;
+  let chosen=null;
+  for(const fs of candidates){
+    const rawLines=wrapMeasured(String(text||''),maxW,reelRenderFont('Inter'),fs,700);
+    const lines=rawLines.filter(line=>String(line).trim()!=='');
+    const lastBaseline=370+Math.max(0,lines.length-1)*fs*lineHeight;
+    const textBottom=lastBaseline+fs*0.16;
+    chosen={fontSize:fs,lines,lineHeight,textBottom};
+    if(textBottom<=maxTextBottom) break;
+  }
+  return chosen;
+}
+
+function reelImportanceRanges(text){
+  const t=String(text||'');
+  try{
+    // Reel highlighting is intentionally claim-first, not keyword-first.
+    // The goal is to surface the sentence a viewer should remember, rather than
+    // whatever sentence happens to contain a number, GPU, benchmark term, etc.
+    const sentenceSpans=[]; let start=0;
+    for(let i=0;i<t.length;i++){
+      if(sentencePunct(t,i)){
+        const end=i+1;
+        const raw=t.slice(start,end);
+        if(raw.trim()){
+          const lead=raw.search(/\S/); const trimmed=raw.trimEnd();
+          sentenceSpans.push({start:start+Math.max(0,lead),end:start+trimmed.length,text:trimmed});
+        }
+        start=end;
+      }
+    }
+    if(start<t.length && t.slice(start).trim()){
+      const raw=t.slice(start), lead=raw.search(/\S/);
+      sentenceSpans.push({start:start+Math.max(0,lead),end:t.length,text:raw.trim()});
+    }
+
+    const scored=[];
+    sentenceSpans.forEach((sp,idx)=>{
+      const q=sp.text;
+      let score=0;
+      const lower=q.toLowerCase();
+
+      // Strong positive signals: introductions, product/model + capability,
+      // explicit claims, or memorable concluding slogans.
+      const hook=/\b(?:introducing|meet|say hello to|announcing|announced|launch(?:ed|ing)?|new|now available|today|here(?:'s| is)|the world's|world's|first[- ]ever|first|best|fastest|largest|most|only|state of the art|record[- ]breaking|game[- ]changing)\b/i;
+      const capability=/\b(?:running locally|runs locally|local(?:ly)?|on[- ]device|open[- ]source|open source|text[- ]to[- ]video|image[- ]to[- ]video|voice[- ]to[- ]text|real[- ]time|offline|no cloud|no api|no api required|without the cloud|without an api|built (?:for|to)|designed (?:for|to)|powers?|supports?|works? (?:on|with))\b/i;
+      const result=/\b(?:beats?|beating|outperform(?:s|ed|ing)?|surpass(?:es|ed|ing)?|exceed(?:s|ed|ing)?|scores?|achieves?|gains?|improv(?:e|es|ed|ing)|reaches?|reaching|costs?|priced at|lower cost|more efficient|faster|slower|state of the art|performance|accuracy|latency)\b/i;
+      const slogan=/^[A-Z0-9][A-Z0-9\s'’\-:,.!]+[.!?]?$/;
+
+      // A named model/product is useful when paired with what it does or where
+      // it runs. A bare hardware/model mention is deliberately weak.
+      const namedEntity=/\b(?:MiniMax|Minimax|GPT|Claude|Gemini|Grok|Qwen|Kimi|Llama|DeepSeek|Mistral|Respan|P-1|H3|Flux|ComfyUI|Sora|Veo|Runway)\b(?:\s*[-.]?\s*[A-Za-z0-9]+(?:\.[0-9]+)?)?/i;
+      const hasEntity=namedEntity.test(q);
+      const hasCapability=capability.test(q);
+      const hasHook=hook.test(q);
+      const hasResult=result.test(q);
+      const isSlogan=slogan.test(q) && q.length>=10;
+
+      if(idx===0) score+=16; // opening hook has natural editorial priority
+      if(hasHook) score+=52;
+      if(hasEntity) score+=14;
+      if(hasCapability) score+=42;
+      if(hasResult) score+=28;
+      if(isSlogan) score+=34;
+
+      // Product/model + capability is substantially more meaningful than a
+      // hardware specification. This is what makes “Minimax H3 running locally”
+      // beat “RTX 4070 Ti” in the example.
+      if(hasEntity && hasCapability) score+=48;
+      if(hasEntity && (idx===0 || q.length<=90)) score+=18;
+
+      // Penalize specification-only lines. These are useful information but are
+      // rarely the main hook: VRAM, GPU model, dimensions, percentages, etc.
+      const specOnly=/^(?:~?\s*\d+(?:\.\d+)?\s*(?:GB|MB|TB|GB VRAM|MB VRAM|FPS|Hz)|\d+%|(?:RTX|GTX|RX)\s*\d+[A-Za-z]*(?:\s*(?:Ti|Super))?|\d+\s*[×x]\s*\d+|pass\s*\d+\s*[→>-])/i;
+      const specWords=/\b(?:VRAM|RTX|GTX|Radeon|resolution|GB|MB|TB|\d+×\d+|\d+fps)\b/i;
+      if(specOnly.test(q)) score-=65;
+      if(specWords.test(q) && !hasCapability && !hasResult) score-=38;
+
+      // Technical pipeline lines are secondary unless they explicitly contain a
+      // strong product/capability claim.
+      if(/^pass\s*\d+/i.test(q)) score-=45;
+      if(/^\d+%\s+/i.test(q)) score-=32;
+      if(/^starting today/i.test(q)) score-=8;
+      if(/^every\s+/i.test(q)) score-=12;
+
+      // Very short fragments such as “12GB VRAM.” shouldn't win by accident.
+      if(q.length<12) score-=22;
+
+      scored.push({...sp,score,hasEntity,hasCapability,hasHook,hasResult,isSlogan});
+    });
+
+    // First preference: a genuine product/model hook. If one exists, anchor the
+    // highlight to that sentence rather than selecting a later numeric/spec line.
+    const semanticHooks=scored
+      .filter(x=>x.hasEntity && (x.hasCapability || x.hasHook || x.hasResult) && x.score>=55)
+      .sort((a,b)=>b.score-a.score || a.start-b.start);
+
+    const picked=[];
+    if(semanticHooks.length){
+      // Prefer the earliest strong hook when its score is close to the winner.
+      // This prevents later benchmark/spec sentences from displacing an opening
+      // announcement such as “Minimax H3 running locally.”
+      const best=semanticHooks[0];
+      const earliest=semanticHooks.find(x=>x.start===sentenceSpans[0]?.start || x.start<best.start);
+      const first=earliest && earliest.score>=best.score-22 ? earliest : best;
+      picked.push({start:first.start,end:first.end,score:first.score});
+    }
+
+    // If there is no product/model hook, select one genuinely strong claim.
+    if(!picked.length){
+      const candidates=[...scored].sort((a,b)=>b.score-a.score || a.start-b.start);
+      const best=candidates.find(x=>x.score>=48);
+      if(best) picked.push({start:best.start,end:best.end,score:best.score});
+    }
+
+    // Optionally add a second independent claim/slogan, but never add a mere
+    // specification or hardware line just to fill a second highlight.
+    if(picked.length){
+      const second=scored
+        .filter(x=>x.start!==picked[0].start && x.score>=62 && (x.hasHook||x.hasResult||x.isSlogan||x.hasCapability))
+        .sort((a,b)=>b.score-a.score || a.start-b.start)[0];
+      if(second && !rangesOverlap(picked[0],second)) picked.push({start:second.start,end:second.end,score:second.score});
+    }
+
+    // Tighten sentence-level selections to visible text only.
+    for(const r of picked){
+      while(r.start<r.end && /\s/.test(t[r.start])) r.start++;
+      while(r.end>r.start && /\s/.test(t[r.end-1])) r.end--;
+      while(r.end>r.start && /[,;:]$/.test(t.slice(r.start,r.end))) r.end--;
+    }
+    picked.sort((a,b)=>a.start-b.start);
+    return normalizeHighlightRangesForUrls(t,picked);
+  }catch{
+    return [];
+  }
+}
+
+function reelLineRuns(fullText,lineText,startIndex,ranges){
+  const text=String(lineText||'');
+  const relStart=startIndex;
+  const relEnd=startIndex+text.length;
+  const hits=[];
+  for(const r of (ranges||[])){
+    const a=Math.max(relStart,r.start),b=Math.min(relEnd,r.end);
+    if(b>a) hits.push({start:a-relStart,end:b-relStart});
+  }
+  hits.sort((a,b)=>a.start-b.start||a.end-b.end);
+  const merged=[];
+  for(const h of hits){
+    if(!merged.length||h.start>merged[merged.length-1].end) merged.push(h);
+    else merged[merged.length-1].end=Math.max(merged[merged.length-1].end,h.end);
+  }
+  const runs=[];let pos=0;
+  for(const h of merged){
+    if(h.start>pos) runs.push({text:text.slice(pos,h.start),hi:false});
+    if(h.end>h.start) runs.push({text:text.slice(h.start,h.end),hi:true});
+    pos=h.end;
+  }
+  if(pos<text.length) runs.push({text:text.slice(pos),hi:false});
+  return runs;
+}
+
+function reelTextLayoutDetailed(text){
+  const base=reelTextLayout(text);
+  const src=String(text||'');
+  const ranges=reelImportanceRanges(src);
+  const lines=[];
+  let cursor=0;
+  for(const line of base.lines){
+    const idx=src.indexOf(line,cursor);
+    const start=idx>=0?idx:cursor;
+    lines.push({text:line,start,runs:reelLineRuns(src,line,start,ranges)});
+    cursor=start+line.length;
+  }
+  return {...base,linesDetailed:lines};
+}
+
+function reelAvatarImage(data){
+  return data?.avatar || '/ai-knowledge-profile.jpg';
+}
+const REEL_DESIGNS={
+  bold:{name:'Bold Creator',bg:'#080808',fg:'#fff',muted:'#bdbdbd',accent:'#39FF14',card:'#151515',font:'Inter',weight:900},
+  news:{name:'News Flash',bg:'#f5f5f0',fg:'#111',muted:'#62635e',accent:'#39FF14',card:'#fff',font:'Inter',weight:800},
+  terminal:{name:'Terminal',bg:'#020402',fg:'#d9ffd9',muted:'#73a073',accent:'#39FF14',card:'#071007',font:'DM Mono',weight:600},
+  gradient:{name:'Gradient Glow',bg:'#090814',fg:'#fff',muted:'#b4b0c6',accent:'#39FF14',card:'#141224',font:'Inter',weight:700}
+};
+function reelDesign(id){return REEL_DESIGNS[id]||REEL_DESIGNS.bold}
+function reelBackgroundSvg(d,id){
+  if(id==='gradient') return `<defs><linearGradient id="rb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#090814"/><stop offset=".45" stop-color="#25123f"/><stop offset="1" stop-color="#06140c"/></linearGradient><filter id="blur"><feGaussianBlur stdDeviation="90"/></filter></defs><rect width="1080" height="1920" fill="url(#rb)"/><circle cx="860" cy="410" r="260" fill="#39FF14" opacity=".13" filter="url(#blur)"/><circle cx="180" cy="1100" r="240" fill="#a855f7" opacity=".16" filter="url(#blur)"/><circle cx="520" cy="145" r="5" fill="#39FF14" opacity=".7"/>`;
+  if(id==='bold') return `<rect width="1080" height="1920" fill="${d.bg}"/><rect x="0" y="0" width="22" height="1920" fill="#39FF14"/>`;
+  if(id==='news') return `<rect width="1080" height="1920" fill="${d.bg}"/><rect x="0" y="0" width="1080" height="12" fill="#111"/><rect x="64" y="120" width="180" height="6" fill="#111"/><rect x="64" y="146" width="430" height="2" fill="#111" opacity=".25"/>`;
+  if(id==='terminal') return `<defs><pattern id="tg" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M0 32L32 0" stroke="#39FF14" stroke-opacity=".045"/></pattern></defs><rect width="1080" height="1920" fill="${d.bg}"/><rect width="1080" height="1920" fill="url(#tg)"/><rect x="64" y="120" width="952" height="2" fill="#39FF14" opacity=".35"/><rect x="64" y="145" width="18" height="4" fill="#39FF14" opacity=".5"/>`;
+  return `<rect width="1080" height="1920" fill="${d.bg}"/>`;
+}
+function reelVideoGeometry(textLayout,designId){
+  const fs=textLayout.fontSize;
+  const lh=fs*textLayout.lineHeight;
+  const count=textLayout.linesDetailed.length;
+  const firstBaseline=370;
+  const lastBaseline=firstBaseline + Math.max(0,count-1)*lh;
+  const textBottom=lastBaseline + fs*0.18;
+  // Hard boundary: video starts only after the complete text block plus a
+  // generous gap. There is no fixed upper clamp that can push the video back
+  // underneath text.
+  const y=Math.max(680,textBottom+56);
+  const bottomLimit=1550;
+  const h=Math.max(320,Math.min(760,bottomLimit-y));
+  return {x:64,y,w:760,h,textBottom,gap:56};
+}
+function reelSvg(data,units,designId='bold',preview=false,layer='full'){
+  const d=reelDesign(designId), text=pageText(units), l=reelTextLayoutDetailed(text), W=1080,H=1920; const renderFont=reelRenderFont(d.font);
+  let s=`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
+  if(layer!=='foreground') s+=reelBackgroundSvg(d,designId);
+  const dark=d.bg==='#050505'||d.bg==='#090909'||d.bg==='#0b0d10'||d.bg==='#030706'||d.bg==='#020402'||d.bg==='#101010'||d.bg==='#090814';
+  const ax=64,ay=210,ar=31;
+  s+=av(data,ax+ar,ay+ar,ar,'reelOriginalAvatar');
+  s+=`<text x="${ax+78}" y="${ay+28}" font-family="${renderFont}" font-size="24" font-weight="800" fill="${d.fg}">${esc(data.authorName||'Unknown account')}</text>`;
+  s+=`<text x="${ax+78}" y="${ay+57}" font-family="${renderFont}" font-size="18" fill="${d.muted}">${esc(data.handle||'@unknown')}</text>`;
+  s+=`<rect x="64" y="312" width="760" height="${designId==='breaking'?7:4}" fill="${d.accent}"/>`;
+  const fs=l.fontSize,lh=fs*l.lineHeight,textX=64,textY=370;
+  let y=textY;
+  for(const line of l.linesDetailed){let x=textX;for(const run of line.runs){const mw=measureSvgTextWidth(run.text,renderFont,fs,d.weight);if(run.hi){s+=`<rect x="${(x-1).toFixed(2)}" y="${(y-fs*.82).toFixed(2)}" width="${(mw+2).toFixed(2)}" height="${(fs*1.02).toFixed(2)}" rx="3" fill="${d.accent}"/>`;s+=`<text x="${x.toFixed(2)}" y="${y.toFixed(2)}" font-family="${renderFont}" font-size="${fs}" font-weight="${d.weight}" fill="#050505">${esc(run.text)}</text>`;}else{s+=`<text x="${x.toFixed(2)}" y="${y.toFixed(2)}" font-family="${renderFont}" font-size="${fs}" font-weight="${d.weight}" fill="${d.fg}">${esc(run.text)}</text>`;}x+=mw;}y+=lh;}
+  const rg=reelVideoGeometry(l,designId), videoY=rg.y, videoH=rg.h;
+  if(designId==='glass'||designId==='stack') s+=`<rect x="50" y="${videoY-14}" width="788" height="${videoH+28}" rx="28" fill="${d.card}" opacity=".9" stroke="#fff" stroke-opacity=".08"/>`;
+  s+=`<rect x="64" y="${videoY}" width="760" height="${videoH}" rx="18" fill="${preview?'transparent':d.card}" stroke="${dark?'#252525':'#ddddda'}" stroke-width="2"/>`;
+  const followY=videoY+videoH+68;
+  if(followY<1840){
+    s+=`<text x="64" y="${followY}" font-family="${renderFont}" font-size="24" font-weight="800" fill="${d.fg}">Follow for more updates</text>`;
+  }
+
+  s+='</svg>'; return s;
+}
+
+function reelDrawFrame(ctx,canvas,video,data,textLayout,showGuide=false,designId='bold'){
+  const d=reelDesign(designId),W=1080,H=1920,renderFont=reelRenderFont(d.font);
+  ctx.clearRect(0,0,W,H);ctx.fillStyle=d.bg;ctx.fillRect(0,0,W,H);
+  if(designId==='gradient'){const g=ctx.createLinearGradient(0,0,W,H);g.addColorStop(0,'#090814');g.addColorStop(.55,'#151028');g.addColorStop(1,'#06140c');ctx.fillStyle=g;ctx.fillRect(0,0,W,H)}
+  const ax=64,ay=210,ar=31;
+  const originalAvatar=data?.avatar;
+  if(originalAvatar){
+    let img=data.__reelAvatarImage;
+    if(!img){img=new Image();img.src=originalAvatar;data.__reelAvatarImage=img;}
+    if(img.complete&&img.naturalWidth){ctx.save();ctx.beginPath();ctx.arc(ax+ar,ay+ar,ar,0,Math.PI*2);ctx.clip();ctx.drawImage(img,ax,ay,ar*2,ar*2);ctx.restore();}
+  }else{ctx.fillStyle='#222';ctx.beginPath();ctx.arc(ax+ar,ay+ar,ar,0,Math.PI*2);ctx.fill()}
+  ctx.textAlign='left';ctx.fillStyle=d.fg;ctx.font=`800 24px ${renderFont}`;ctx.fillText(String(data?.authorName||'Unknown account'),ax+78,ay+28);
+  ctx.fillStyle=d.muted;ctx.font=`500 18px ${renderFont}`;ctx.fillText(String(data?.handle||'@unknown'),ax+78,ay+57);
+  ctx.fillStyle=d.accent;ctx.fillRect(64,312,760,4);
+  const fs=textLayout.fontSize,lh=fs*textLayout.lineHeight;let y=370;
+  for(const line of textLayout.linesDetailed){
+    let x=64;
+    for(const run of line.runs){
+      const mw=measureTextWidth(run.text,renderFont,fs,d.weight);
+      if(run.hi){ctx.fillStyle=d.accent;ctx.fillRect(x-2,y-fs*.82,mw+4,fs*1.02);ctx.fillStyle='#050505'}else ctx.fillStyle=d.fg;
+      ctx.font=`${d.weight} ${fs}px ${renderFont}`;ctx.fillText(run.text,x,y);x+=mw;
+    }
+    y+=lh;
+  }
+  const rg=reelVideoGeometry(textLayout,designId);
+  const videoY=rg.y,videoH=rg.h;
+  if(designId==='glass'||designId==='stack'){ctx.fillStyle=d.card;ctx.globalAlpha=.9;ctx.beginPath();ctx.roundRect(50,videoY-14,788,videoH+28,28);ctx.fill();ctx.globalAlpha=1}
+  ctx.fillStyle=d.card;ctx.beginPath();ctx.roundRect(64,videoY,760,videoH,18);ctx.fill();
+  if(video&&video.readyState>=2&&video.videoWidth&&video.videoHeight){
+    const scale=Math.min(760/video.videoWidth,videoH/video.videoHeight),dw=video.videoWidth*scale,dh=video.videoHeight*scale;
+    ctx.save();ctx.beginPath();ctx.roundRect(64,videoY,760,videoH,18);ctx.clip();ctx.drawImage(video,64+(760-dw)/2,videoY+(videoH-dh)/2,dw,dh);ctx.restore();
+  }
+  const followY=videoY+videoH+68;
+  if(followY<1840){ctx.fillStyle=d.fg;ctx.font=`800 24px ${renderFont}`;ctx.textAlign='left';ctx.fillText('Follow for more updates',64,followY);}
+  if(showGuide){ctx.strokeStyle='rgba(255,255,255,.16)';ctx.setLineDash([12,12]);ctx.strokeRect(40,205,800,1360);ctx.setLineDash([]);ctx.fillStyle='rgba(255,255,255,.45)';ctx.font='500 16px Inter';ctx.fillText('CONTENT SAFE AREA',64,198)}
+}
+
+function drawReelVideoFrame(ctx,video,videoY,videoH){
+  if(!video||video.readyState<2||!video.videoWidth||!video.videoHeight)return;
+  const scale=Math.min(760/video.videoWidth,videoH/video.videoHeight),dw=video.videoWidth*scale,dh=video.videoHeight*scale;
+  ctx.save();ctx.beginPath();ctx.roundRect(64,videoY,760,videoH,18);ctx.clip();ctx.drawImage(video,64+(760-dw)/2,videoY+(videoH-dh)/2,dw,dh);ctx.restore();
+}
+
+let __mediabunnyPromise=null;
+async function loadMediabunny(){
+  if(window.Mediabunny) return window.Mediabunny;
+  if(!__mediabunnyPromise){
+    __mediabunnyPromise=import('https://esm.unpkg.com/mediabunny@1.55.6?target=es2022').then(m=>{
+      window.Mediabunny=m;
+      return m;
+    });
+  }
+  return __mediabunnyPromise;
+}
+
+async function exportReel(card, video, data, units, textLayout, designId, remoteVideoUrl='', warmOnly=false, quality='1080-30'){
+  const status=card.querySelector('.reel-status');
+  const setStatus=t=>{if(status)status.textContent=t};
+  if(!video) throw new Error('Add a post video first.');
+
+  const qualityConfig={
+    '1080-30':{width:1080,height:1920,fps:30,bitrate:4200000,label:'1080p 30 FPS'},
+    '1080-60':{width:1080,height:1920,fps:60,bitrate:5200000,label:'1080p 60 FPS'},
+    '1440-30':{width:1440,height:2560,fps:30,bitrate:6500000,label:'2K 30 FPS'},
+    '1440-60':{width:1440,height:2560,fps:60,bitrate:8500000,label:'2K 60 FPS'},
+    '2160-30':{width:2160,height:3840,fps:30,bitrate:10000000,label:'4K 30 FPS'},
+    '2160-60':{width:2160,height:3840,fps:60,bitrate:13000000,label:'4K 60 FPS'}
+  };
+  const q=qualityConfig[String(quality)]||qualityConfig['1080-30'];
+  const S=q.width/1080;
+  const isMobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)||Math.min(innerWidth,innerHeight)<820;
+  const lowMemory=Number(navigator.deviceMemory||8)<=4;
+
+  let sourceUrl=remoteVideoUrl||video.currentSrc||video.src||video.dataset.lazySrc||'';
+  if(sourceUrl && /^https?:\/\//i.test(sourceUrl) && !sourceUrl.startsWith(location.origin)){
+    sourceUrl='/api/asset?url='+encodeURIComponent(sourceUrl);
+  }
+  if(!sourceUrl) throw new Error('Add a post video first.');
+
+  setStatus(`${q.label} export — preparing…`);
+  const MB=await loadMediabunny();
+  const {Input,ALL_FORMATS,BlobSource,UrlSource,Output,BufferTarget,Mp4OutputFormat,Conversion,Quality}=MB;
+  if(!Input||!ALL_FORMATS||!Output||!BufferTarget||!Mp4OutputFormat||!Conversion) throw new Error('Fast exporter could not initialize.');
+
+  // Mobile browsers pay a large penalty when a long video is read through many HTTP
+  // range requests. Download it once into memory, then decode locally from a BlobSource.
+  // Desktop keeps the range-streaming source to avoid a large up-front memory spike.
+  let input;
+  const perf={started:performance.now()};
+  try{
+    if(/^blob:/i.test(sourceUrl)){
+      const blob=await fetch(sourceUrl).then(r=>{if(!r.ok)throw new Error('Could not read uploaded video.');return r.blob()});
+      input=new Input({formats:ALL_FORMATS,source:new BlobSource(blob)});
+    }else if(isMobile){
+      setStatus(`${q.label} export — downloading source once for faster mobile processing…`);
+      const res=await fetch(sourceUrl,{cache:'force-cache'});
+      if(!res.ok) throw new Error(`Could not download source video (${res.status}).`);
+      const blob=await res.blob();
+      perf.sourceDownloaded=performance.now();
+      input=new Input({formats:ALL_FORMATS,source:new BlobSource(blob)});
+    }else{
+      const absolute=new URL(sourceUrl,location.href).href;
+      input=new Input({formats:ALL_FORMATS,source:new UrlSource(absolute,{parallelism:8,maxCacheSize:128*1024*1024})});
+    }
+  }catch(err){throw new Error(`Could not open the video: ${err.message||err}`)}
+
+  let canvas,ctx,staticCanvas,staticCtx;
+  try{
+    // OffscreenCanvas avoids some mobile DOM-canvas overhead. Fall back to regular
+    // canvases for browsers that do not implement it.
+    const useOffscreen=typeof OffscreenCanvas==='function';
+    canvas=useOffscreen?new OffscreenCanvas(q.width,q.height):document.createElement('canvas');
+    staticCanvas=useOffscreen?new OffscreenCanvas(q.width,q.height):document.createElement('canvas');
+    if(!useOffscreen){canvas.width=q.width;canvas.height=q.height;staticCanvas.width=q.width;staticCanvas.height=q.height;}
+    ctx=canvas.getContext('2d',{alpha:false,desynchronized:true,willReadFrequently:false});
+    staticCtx=staticCanvas.getContext('2d',{alpha:false,desynchronized:true,willReadFrequently:false});
+  }catch{ throw new Error(`Could not allocate ${q.label}. Try a lower quality.`); }
+  if(!ctx||!staticCtx) throw new Error('The browser could not create the export canvas.');
+  ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality=isMobile?'medium':'high';
+  staticCtx.imageSmoothingEnabled=true; staticCtx.imageSmoothingQuality='high';
+
+  staticCtx.save(); staticCtx.scale(S,S);
+  reelDrawFrame(staticCtx,staticCanvas,null,data,textLayout,false,designId);
+  staticCtx.restore();
+  if(data&&data.__reelAvatarImage&&!data.__reelAvatarImage.complete){
+    try{await data.__reelAvatarImage.decode()}catch{}
+    staticCtx.clearRect(0,0,q.width,q.height);
+    staticCtx.save(); staticCtx.scale(S,S); reelDrawFrame(staticCtx,staticCanvas,null,data,textLayout,false,designId); staticCtx.restore();
+  }
+
+  const rg=reelVideoGeometry(textLayout,designId);
+  const videoY=rg.y,videoH=rg.h;
+  const videoX=rg.x,videoW=rg.w;
+  const outVideoX=videoX*S,outVideoY=videoY*S,outVideoW=videoW*S,outVideoH=videoH*S,outRadius=18*S;
+
+  try{
+    if(!(await input.canRead())) throw new Error('The video format is not supported by this browser.');
+    const vtrack=await input.getPrimaryVideoTrack();
+    if(!vtrack) throw new Error('The selected video has no video track.');
+    const sourceDuration=await vtrack.getDurationFromMetadata();
+    const duration=(Number.isFinite(sourceDuration)&&sourceDuration>0)?sourceDuration:0;
+
+    // Reuse the pre-rendered static layer. Only the video rectangle changes per frame.
+    ctx.clearRect(0,0,q.width,q.height);
+    ctx.drawImage(staticCanvas,0,0);
+
+    const output=new Output({format:new Mp4OutputFormat(),target:new BufferTarget()});
+    const conversion=await Conversion.init({
+      input,output,
+      video:{
+        frameRate:q.fps,
+        codec:'avc',
+        quality:new Quality({bitrate:q.bitrate}),
+        hardwareAcceleration:'prefer-hardware',
+        latencyMode:'realtime',
+        keyFrameInterval:20,
+        forceTranscode:true,
+        processedWidth:q.width,
+        processedHeight:q.height,
+        process:(sample)=>{
+          // Keeping the base layer opaque avoids an expensive full-canvas clear.
+          ctx.drawImage(staticCanvas,0,0);
+          const sw=sample.displayWidth||sample.codedWidth;
+          const sh=sample.displayHeight||sample.codedHeight;
+          const fit=Math.min(videoW/sw,videoH/sh);
+          const dw=sw*fit, dh=sh*fit;
+          const dx=videoX+(videoW-dw)/2, dy=videoY+(videoH-dh)/2;
+          ctx.save();
+          ctx.beginPath();ctx.roundRect(outVideoX,outVideoY,outVideoW,outVideoH,outRadius);ctx.clip();
+          sample.draw(ctx,dx*S,dy*S,dw*S,dh*S);
+          ctx.restore();
+          return canvas;
+        }
+      },
+      trim:{start:0,end:duration}
+    });
+    if(!conversion.isValid) throw new Error('Fast hardware export is unavailable in this browser.');
+    conversion.onProgress=(progress)=>{
+      const pct=Math.min(99,Math.max(0,Math.round(progress*100)));
+      setStatus(`${q.label} export — ${pct}%${isMobile?' · mobile optimized':''}`);
+    };
+    const started=performance.now();
+    setStatus(`${q.label} export — 0%${isMobile?' · mobile optimized':''}`);
+    await conversion.execute();
+    const buffer=output.target.buffer;
+    if(!buffer||!buffer.byteLength) throw new Error('The browser produced an empty Reel.');
+    const blob=new Blob([buffer],{type:'video/mp4'});
+    const filename=`tweetstudio-reel-${designId}-${q.label.toLowerCase().replace(/\s+/g,'-')}.mp4`;
+    await downloadBlob(blob,filename);
+    const elapsed=Math.round((performance.now()-started)/1000);
+    const totalElapsed=Math.round((performance.now()-perf.started)/1000);
+    setStatus(`${q.label} Reel ready — ${totalElapsed}s total.`);
+    trackEvent('reel_downloaded',{format:'mp4',mode:'webcodecs_mobile_optimized',mobile:isMobile,lowMemory,width:q.width,height:q.height,fps:q.fps,duration:Math.round(duration*100)/100,size:blob.size,elapsed,totalElapsed,sourceDownloadSeconds:perf.sourceDownloaded?Math.round((perf.sourceDownloaded-perf.started)/1000):0});
+  }finally{
+    try{input?.dispose?.()}catch{}
+  }
+}
+function render(id,data,units,idx,total){
+  const cfg=TEMPLATES.find(t=>t.id===id).cfg;
+  const layout=fitText(units,cfg);
+  const ls=layout.lines;
+  let s=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1080" height="1080" viewBox="0 0 1080 1080">`;
+
+  if(id==='blue'){
+    s+=`<rect width="1080" height="1080" fill="#28a2e8"/><rect x="104" y="104" width="872" height="872" fill="#fff"/>`;
+    s+=author(data,158,165,false,1);
+    s+=txt(ls,150,cfg.textTop,layout.fontSize,layout.lineHeight,'#111','Inter',500,'start');
+    s+=progress(idx,total,'#666');
+  }
+
+  if(id==='purple'){
+    s+=`<rect width="1080" height="1080" fill="#3a226c"/><defs><filter id="purpleBlur"><feGaussianBlur stdDeviation="22"/></filter></defs>`;
+    s+=`<g opacity=".24" filter="url(#purpleBlur)">${av(data,540,520,250,'purpleAvatar')}</g>`;
+    s+=txt(ls,78,cfg.textTop,layout.fontSize,layout.lineHeight,'#fff','Inter',700);
+    s+=`<line x1="78" y1="784" x2="470" y2="784" stroke="#ddd6ef" stroke-width="2"/>`;
+    s+=`<text x="78" y="858" font-family="Inter" font-size="29" font-weight="800" fill="#fff">${esc(data.authorName||'Unknown account')}</text><text x="78" y="900" font-family="Inter" font-size="23" fill="#c3b9dd">${esc(data.handle||'@unknown')}</text>`;
+    s+=progress(idx,total,'#c3b9dd');
+  }
+
+  if(id==='highlight' || id==='darkHighlight'){
+    const dark=id==='darkHighlight';
+    const bg=dark?'#050505':'#fffef8';
+    const fg=dark?'#fff':'#111';
+    const handleFill=dark?'#a7a7a7':'#b7b7b7';
+    s+=`<rect width="1080" height="1080" fill="${bg}"/>`;
+    let y=cfg.textTop;
+    const fs=layout.fontSize,lh=fs*layout.lineHeight;
+    const textX=80;
+    for(const rawLine of ls){
+      if(!rawLine){y+=lh*.82;continue;}
+      const line=String(rawLine).trimEnd();
+      const measured=measureTextWidth(line,'Playfair Display',fs,500);
+      const selectionPad=1;
+      const highlightW=Math.max(1,measured+selectionPad*2);
+      const highlightY=y-fs*.90;
+      const highlightH=fs*1.12;
+      s+=`<rect x="${textX-selectionPad}" y="${highlightY}" width="${highlightW}" height="${highlightH}" fill="#ffd600"/>`;
+      // Full editorial highlight: yellow background + black text for maximum contrast.
+      s+=`<text x="${textX}" y="${y}" font-family="Playfair Display" font-size="${fs}" font-weight="500" fill="#050505" xml:space="preserve">${esc(line)}</text>`;
+      y+=lh;
+    }
+    s+=`<text x="360" y="882" font-family="Inter" font-size="29" font-weight="800" fill="${fg}">${esc(data.authorName||'Unknown account')}</text><text x="360" y="928" font-family="Inter" font-size="23" fill="${handleFill}">${esc(data.handle||'@unknown')}</text>`;
+    s+=av(data,828,885,dark?'92':'92',dark?'darkHighlightAuthor':'highlightAuthor');
+    s+=progress(idx,total,dark?'#aaa':'#777');
+  }
+
+
+  if(id==='selective' || id==='darkSelective' || id==='darkLimeSelective'){
+    const dark=id!=='selective';
+    const bg=dark?'#050505':'#fffef8';
+    const normal=dark?'#fff':'#111';
+    const handleFill=dark?'#a7a7a7':'#b7b7b7';
+    const highlightFill=id==='darkLimeSelective'?'#39FF14':'#ffd600';
+    s+=`<rect width="1080" height="1080" fill="${bg}"/>`;
+    const fs=layout.fontSize, lh=fs*layout.lineHeight;
+    const textX=80;
+    let y=cfg.textTop;
+    for(let ui=0;ui<units.length;ui++){
+      const u=units[ui];
+      const src=String(u.text||'');
+      const ranges=importanceRanges(src);
+      const lines=wrappedRuns(src,cfg.maxW||930,'Playfair Display',fs,500);
+      for(const line of lines){
+        if(dark){
+          s+=selectiveLineSvgColored(src,line,ranges,textX,y,fs,'Playfair Display',500,normal,highlightFill);
+        }else{
+          s+=selectiveLineSvg(src,line,ranges,textX,y,fs,'Playfair Display',500);
+        }
+        y+=lh;
+      }
+      if(ui<units.length-1) y+=fs*cfg.paraGap;
+    }
+    s+=`<text x="360" y="882" font-family="Inter" font-size="29" font-weight="800" fill="${normal}">${esc(data.authorName||'Unknown account')}</text><text x="360" y="928" font-family="Inter" font-size="23" fill="${handleFill}">${esc(data.handle||'@unknown')}</text>`;
+    s+=av(data,828,885,92,id==='darkLimeSelective'?'darkLimeSelectiveAuthor':id==='darkSelective'?'darkSelectiveAuthor':'selectiveAuthor');
+    s+=progress(idx,total,dark?'#aaa':'#777');
+  }
+
+  if(id==='acid'){
+    s+=`<rect width="1080" height="1080" fill="#39FF14"/>`;
+    s+=`<rect x="0" y="0" width="1080" height="104" fill="#101010"/>`;
+    s+=`<rect x="68" y="150" width="944" height="730" rx="34" fill="#101010" transform="rotate(-2 540 515)"/>`;
+    // Keep the profile badge visually separate from the body copy. The upper-right
+    // circle is treated as a reserved region rather than something text can overlap.
+    s+=`<circle cx="872" cy="194" r="116" fill="#F7FF00"/>`;
+    s+=av(data,872,194,84,'acidAvatar');
+    s+=`<text x="36" y="66" font-family="'DM Mono'" font-size="20" font-weight="500" fill="#39FF14">${esc(data.handle||'@unknown')}</text>`;
+    // The top of the poster reserves the upper-right corner for the profile badge,
+    // but lower content has no such obstruction. Use a narrow text column only while
+    // the badge overlaps the body area, then expand to the full safe width below it.
+    const acidCfg={...cfg,c:52,textTop:286,textH:500};
+    const acidLayout=fitText(units,acidCfg);
+    const acidFs=acidLayout.fontSize;
+    const acidLh=acidLayout.lineHeight;
+    const acidText=pageText(units);
+    const acidParagraphs=acidText.split('\n\n').filter(Boolean);
+    const firstPart=acidParagraphs.length?acidParagraphs[0]:acidText;
+    const restPart=acidParagraphs.slice(1).join('\n\n');
+    const topLines=wrapMeasured(firstPart,620,'Inter',acidFs,700);
+    const topLineCount=topLines.length;
+    const topY=acidCfg.textTop;
+    let acidY=topY;
+    s+=topLines.map((line,i)=>`<text x="112" y="${topY+i*acidFs*acidLh}" font-family="Inter" font-size="${acidFs}px" font-weight="700" fill="#fff" text-anchor="start">${esc(line)}</text>`).join('');
+    acidY += topLineCount*acidFs*acidLh;
+    if(restPart){
+      acidY += acidFs*.85;
+      const lowerLines=wrapMeasured(restPart,760,'Inter',acidFs,700);
+      s+=lowerLines.map((line,i)=>`<text x="112" y="${acidY+i*acidFs*acidLh}" font-family="Inter" font-size="${acidFs}px" font-weight="700" fill="#fff" text-anchor="start">${esc(line)}</text>`).join('');
+    }
+    s+=`<rect x="112" y="820" width="260" height="5" fill="#39FF14"/><text x="112" y="860" font-family="Inter" font-size="22" font-weight="800" fill="#fff">${esc(data.authorName||'Unknown account')}</text>`;
+    s+=progress(idx,total,'#101010');
+  }
+
+  if(id==='hyper'){
+    s+=`<defs><linearGradient id="hyperBg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#4B00FF"/><stop offset="100%" stop-color="#00D9FF"/></linearGradient></defs>`;
+    s+=`<rect width="1080" height="1080" fill="url(#hyperBg)"/>`;
+    s+=`<rect x="78" y="78" width="924" height="924" rx="42" fill="#F9FF00"/>`;
+    s+=`<circle cx="108" cy="100" r="72" fill="#FF3EA5"/><circle cx="975" cy="972" r="80" fill="#00F0FF"/>`;
+    s+=av(data,108,100,48,'hyperAuthor');
+    s+=`<text x="214" y="132" font-family="Inter" font-size="30" font-weight="800" fill="#111">${esc(data.authorName||'Unknown account')}</text><text x="214" y="164" font-family="Inter" font-size="21" fill="#111" opacity=".72">${esc(data.handle||'@unknown')}</text>`;
+    s+=txt(ls,110,cfg.textTop,layout.fontSize,layout.lineHeight,'#111','Inter',700,'start');
+    s+=`<rect x="110" y="900" width="230" height="12" fill="#FF3EA5"/><rect x="350" y="900" width="230" height="12" fill="#4B00FF"/>`;
+    s+=progress(idx,total,'#111');
+  }
+
+  if(id==='sunset'){
+    s+=`<defs><linearGradient id="sunsetBg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FF5E78"/><stop offset="48%" stop-color="#FF9A3D"/><stop offset="100%" stop-color="#00D7D7"/></linearGradient></defs>`;
+    s+=`<rect width="1080" height="1080" fill="url(#sunsetBg)"/>`;
+    s+=`<circle cx="880" cy="210" r="210" fill="#FFE600" opacity=".86"/><rect x="70" y="80" width="940" height="880" rx="46" fill="#FFF4E8" transform="rotate(1.4 540 520)"/>`;
+    s+=`<text x="102" y="158" font-family="'DM Mono'" font-size="18" fill="#FF5E78">${esc(data.handle||'@unknown')}</text>`;
+    s+=txt(ls,102,cfg.textTop,layout.fontSize,layout.lineHeight,'#161616','Playfair Display',600,'start');
+    s+=av(data,892,848,68,'sunsetAuthor');
+    s+=`<text x="102" y="876" font-family="Inter" font-size="27" font-weight="800" fill="#161616">${esc(data.authorName||'Unknown account')}</text>`;
+    s+=progress(idx,total,'#161616');
+  }
+
+  if(id==='cyber'){
+    s+=`<rect width="1080" height="1080" fill="#07080C"/>`;
+    s+=`<rect x="34" y="34" width="1012" height="1012" rx="38" fill="none" stroke="#00F0FF" stroke-width="4"/><rect x="52" y="52" width="976" height="976" rx="28" fill="#0E1118"/>`;
+    s+=`<rect x="78" y="92" width="170" height="42" rx="21" fill="#FF2AA3"/><text x="163" y="120" text-anchor="middle" font-family="'DM Mono'" font-size="16" fill="#111">LIVE POST</text>`;
+    s+=av(data,116,214,46,'cyberAuthor');
+    s+=`<text x="184" y="210" font-family="Inter" font-size="28" font-weight="800" fill="#fff">${esc(data.authorName||'Unknown account')}</text><text x="184" y="242" font-family="Inter" font-size="21" fill="#8C95A5">${esc(data.handle||'@unknown')}</text>`;
+    s+=`<text x="866" y="122" text-anchor="end" font-family="'DM Mono'" font-size="16" fill="#00F0FF">01 // ${String(idx+1).padStart(2,'0')}</text>`;
+    s+=txt(ls,92,cfg.textTop,layout.fontSize,layout.lineHeight,'#fff','Inter',600,'start');
+    s+=`<line x1="92" y1="922" x2="988" y2="922" stroke="#202936" stroke-width="2"/><text x="92" y="964" font-family="'DM Mono'" font-size="16" fill="#00F0FF">TWEETSTUDIO / X→IG</text>`;
+    s+=`<circle cx="938" cy="956" r="26" fill="#39FF14"/><circle cx="972" cy="956" r="26" fill="#FF2AA3"/>`;
+    s+=progress(idx,total,'#8C95A5');
+  }
+
+  if(id==='black'){
+    s+=`<rect width=\"1080\" height=\"1080\" fill=\"#050505\"/>`;
+    s+=author(data,78,70,true,.82);
+    const bodyX=78, bodyY=cfg.textTop, bodyFs=layout.fontSize, bodyLh=bodyFs*layout.lineHeight;
+    const bodyMaxW=900;
+    // Highlight the meaningful claim for each paragraph/bullet rather than blindly
+    // highlighting model names or generic words such as “frontier”.
+    // Keep the emphasis intentionally sparse: one strongest claim per slide.
+    const pageRanges=[];
+    units.forEach((u,ui)=>{
+      importanceRanges(u.text).forEach(r=>pageRanges.push({...r,ui}));
+    });
+    pageRanges.sort((a,b)=>(b.score??0)-(a.score??0) || (a.end-a.start)-(b.end-b.start));
+    const chosen=pageRanges.length?[pageRanges[0]]:[];
+    let y=bodyY;
+    const gap=bodyFs*.95;
+    units.forEach((u,ui)=>{
+      const src=String(u.text||'');
+      const ranges=chosen.filter(r=>r.ui===ui);
+      const lines=wrappedRuns(src,bodyMaxW,'Inter',bodyFs,500);
+      for(const line of lines){
+        if(y>1002) break;
+        s+=styledLineSvg(src,line,ranges,bodyX,y,bodyFs,layout.lineHeight,'Inter',500,'#fff','#39FF14','start');
+        y+=bodyLh;
+      }
+      y+=gap;
+    });
+    s+=progress(idx,total,'#39FF14');
+  }
+  s+='</svg>';
+  return s;
+}
+
+function svgURL(svg){return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg)}
+async function downloadBlob(blob,filename){
+  if(!blob || !blob.size) throw new Error('Nothing was generated to download.');
+  const url=URL.createObjectURL(blob);
+  if(window.navigator && typeof navigator.msSaveOrOpenBlob==='function'){
+    navigator.msSaveOrOpenBlob(blob,filename);
+    setTimeout(()=>URL.revokeObjectURL(url),120000);
+    return url;
+  }
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=filename;
+  a.rel='noopener';
+  a.style.display='none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{try{a.remove()}catch{}},1000);
+  setTimeout(()=>URL.revokeObjectURL(url),120000);
+  return url;
+}
+
+async function blobFromSvgSized(svg,format,width=1080,height=1920){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let c;
+      try{c=document.createElement('canvas');c.width=width;c.height=height}catch{reject(new Error(`Could not allocate a ${width}×${height} export.`));return}
+      const x=c.getContext('2d',{alpha:false});
+      if(!x){reject(new Error('Export canvas is not available.'));return}
+      x.fillStyle='#050505';x.fillRect(0,0,width,height);x.imageSmoothingEnabled=true;x.imageSmoothingQuality='high';x.drawImage(img,0,0,width,height);
+      const mime=format==='jpeg'?'image/jpeg':'image/png';const quality=format==='jpeg'?.98:undefined;
+      c.toBlob(b=>b?resolve(b):reject(new Error('The Reel frame could not be encoded.')),mime,quality);
+    };
+    img.onerror=()=>reject(new Error('The Reel frame could not be rendered.'));img.src=svgURL(svg);
+  });
+}
+
+async function svgToPngDataUrl(svg,width=1080,height=1920,alpha=false){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let c;
+      try{c=document.createElement('canvas');c.width=width;c.height=height}catch{reject(new Error('Could not allocate the Reel overlay canvas.'));return}
+      const x=c.getContext('2d',{alpha}); if(!x){reject(new Error('Reel overlay canvas is unavailable.'));return}
+      if(!alpha){x.fillStyle='#050505';x.fillRect(0,0,width,height);}
+      x.imageSmoothingEnabled=true;x.imageSmoothingQuality='high';
+      x.drawImage(img,0,0,width,height);
+      c.toBlob(async b=>{
+        if(!b){reject(new Error('The Reel overlay could not be encoded.'));return}
+        try{
+          const reader=new FileReader();
+          reader.onload=()=>resolve(reader.result);
+          reader.onerror=()=>reject(new Error('Could not prepare Reel overlay.'));
+          reader.readAsDataURL(b);
+        }catch(err){reject(err)}
+      },'image/png');
+    };
+    img.onerror=()=>reject(new Error('The Reel overlay could not be rendered.'));
+    img.src=svgURL(svg);
+  });
+}
+
+function parseUrl(url){try{const u=new URL(url);const m=u.pathname.match(/^\/(?:@?)([^/]+)\/status\/(\d+)/i);return m?{handle:m[1],id:m[2]}:null}catch{return null}}
+async function getTweet(url){
+  const p=parseUrl(url);
+  if(!p)throw new Error('Please enter a valid X/Twitter status URL.');
+  const r=await fetch('/api/tweet?handle='+encodeURIComponent(p.handle)+'&id='+p.id);
+  const j=await r.json();
+  if(!r.ok)throw new Error(j.error||'Could not retrieve this post.');
+  return j;
+}
+async function remoteImageDataUrl(src){
+  if(!src) return '';
+  try{
+    const r=await fetch('/api/asset?url='+encodeURIComponent(src));
+    if(!r.ok) return '';
+    const blob=await r.blob();
+    return await new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(reader.result);
+      reader.onerror=reject;
+      reader.readAsDataURL(blob);
+    });
+  }catch{return ''}
+}
+async function getTextPost(){
+  const text=document.getElementById('textInput').value.trim();
+  if(!text) throw new Error('Paste some text first.');
+  const author=document.getElementById('textAuthor').value.trim()||'Your Account';
+  let handle=document.getElementById('textHandle').value.trim()||'@youraccount';
+  if(handle && !handle.startsWith('@')) handle='@'+handle;
+  const avatarSrc=document.getElementById('textAvatar').value.trim();
+  const avatar=avatarSrc ? await remoteImageDataUrl(avatarSrc) : '';
+  return {authorName:author,handle,avatar,text,media:[],source:'text'};
+}
+function getExportSize(){return Number(document.getElementById('resolution')?.value||7680)}
+function updateSizePill(){const n=getExportSize();document.getElementById('sizePill').textContent=`${n.toLocaleString()} × ${n.toLocaleString()}`}
+async function blobFromSvg(svg,format,size=getExportSize()){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let c;
+      try{
+        c=document.createElement('canvas');
+        c.width=size;c.height=size;
+      }catch(err){reject(new Error(`Could not allocate a ${size.toLocaleString()}×${size.toLocaleString()} export. Try a lower resolution.`));return}
+      const x=c.getContext('2d',{alpha:false});
+      if(!x){reject(new Error('Export canvas is not available.'));return}
+      x.fillStyle='#fff';x.fillRect(0,0,size,size);
+      x.imageSmoothingEnabled=true;x.imageSmoothingQuality='high';
+      x.drawImage(img,0,0,size,size);
+      const mime=format==='jpeg'?'image/jpeg':'image/png';
+      const quality=format==='jpeg'?.98:undefined;
+      c.toBlob(b=>b?resolve(b):reject(new Error(`The ${size.toLocaleString()}×${size.toLocaleString()} export could not be encoded. Try PNG or a lower resolution.`)),mime,quality);
+    };
+    img.onerror=()=>reject(new Error('The template could not be rendered for export.'));
+    img.src=svgURL(svg);
+  });
+}
+const STATS_ENDPOINT=(window.TWEETSTUDIO_STATS_ENDPOINT||'/api/stats').replace(/\/$/,'');
+function trackEvent(name,data){
+  try{ if(window.va) window.va('event',{name:name,data:data||{}}); }catch(_){}
+  try{ fetch(STATS_ENDPOINT+'/event',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(Object.assign({name:name}, data||{}))}).catch(()=>{}); }catch(_){}
+}
+function trackPageView(){
+  try{ fetch(STATS_ENDPOINT+'/event',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:'pageview'})}).catch(()=>{}); }catch(_){}
+}
+function setupTemplateList(){const el=document.getElementById('templateList');el.innerHTML='';TEMPLATES.forEach(t=>{const lab=document.createElement('label');lab.className='template-toggle active';lab.innerHTML=`<input type="checkbox" checked><span class="dot" style="background:${t.color}"></span><span><b>${t.name}</b><small>${t.desc}</small></span>`;const cb=lab.querySelector('input');cb.addEventListener('change',()=>{cb.checked?selected.add(t.id):selected.delete(t.id);lab.classList.toggle('active',cb.checked)});el.appendChild(lab)})}
+function renderPostMeta(){const safe=tweet||{};document.getElementById('charStat').textContent=String(safe.text||'').length.toLocaleString()+' characters';document.getElementById('postName').textContent=safe.authorName||'Unknown account';document.getElementById('postHandle').textContent=safe.handle||'@unknown';document.getElementById('postPreview').textContent=(safe.text||'').length>180?safe.text.slice(0,180)+'…':(safe.text||'');document.getElementById('postAvatar').src=safe.avatar||'';}
+let __reelQualityResolve=null;
+function chooseReelQuality(){
+  const modal=document.getElementById('reelQualityModal');
+  if(!modal)return Promise.resolve('1080');
+  modal.hidden=false;
+  return new Promise(resolve=>{
+    __reelQualityResolve=resolve;
+    const finish=value=>{
+      if(modal.hidden)return;
+      modal.hidden=true;
+      const r=__reelQualityResolve;__reelQualityResolve=null;
+      r?.(value||null);
+    };
+    modal.querySelectorAll('[data-reel-quality]').forEach(btn=>{
+      btn.onclick=()=>finish(btn.dataset.reelQuality);
+    });
+    const cancel=document.getElementById('reelQualityCancel');
+    if(cancel)cancel.onclick=()=>finish(null);
+    modal.onclick=e=>{if(e.target===modal)finish(null)};
+  });
+}
+
+function createResults(){
+  const density=document.getElementById('density').value;
+  results=[];
+  TEMPLATES.filter(t=>selected.has(t.id)).forEach(t=>{
+    const pages=paginate(tweet.text,t.cfg,density);
+    results.push({template:t,slides:pages.map((units,i)=>({svg:render(t.id,tweet,units,i,pages.length),text:pageText(units)}))});
+  });
+  const reelUnits=segments(tweet.text);
+  Object.entries(REEL_DESIGNS).forEach(([designId,d])=>{
+    results.push({template:{id:'reel-'+designId,name:d.name,desc:'9:16 Reel design',color:d.accent},reel:true,reelDesignId:designId,units:reelUnits});
+  });
+  renderResults();
+}
+function renderResults(){
+  const gallery=document.getElementById('gallery');gallery.innerHTML='';
+  const activeTab=window.__outputTab||'posts';
+  const postResults=results.filter(g=>!g.reel), reelResults=results.filter(g=>g.reel);
+  const visible=activeTab==='reels'?reelResults:postResults;
+  document.getElementById('empty').style.display=visible.length?'none':'block';
+  const totalSlides=postResults.reduce((n,g)=>n+g.slides.length,0);
+  document.getElementById('resultSummary').textContent=results.length?`${postResults.length} post designs · ${reelResults.length} reel designs · ${totalSlides} post outputs`:'Your designs will appear here';
+  document.getElementById('downloadAllBtn').disabled=!postResults.length;
+  results.forEach(group=>{
+    if((activeTab==='reels')!==!!group.reel) return;
+    if(group.reel){
+      const card=document.createElement('article');card.className='reel-card';
+      const videoMedia=(tweet.media||[]).find(m=>m.videoUrl) || (tweet.media||[]).find(m=>(m.type==='video'||m.type==='gif') && /\.(mp4|m3u8)(?:$|[?#])/i.test(String(m.url||'')));
+      card.innerHTML=`<div class="reel-head"><div><b>${esc(group.template.name)}</b><span>9:16 · account · highlighted text · video</span></div><div class="count">1080×1920</div></div><div class="reel-preview"><img class="reel-bg-layer" alt=""><video class="reel-video-preview" playsinline muted loop preload="none"></video><img class="reel-overlay" alt="${esc(group.template.name)} preview"></div><div class="reel-tools"><label class="reel-file-label">Upload video<input class="reel-file" type="file" accept="video/*"></label><button class="reel-frame">Download frame</button><button class="reel-download">Download Reel</button><a class="reel-save-link" hidden>Save Reel</a></div><div class="reel-status">${videoMedia?.videoUrl?'The X post video is loaded automatically. Upload another video to replace it. Reel export uses a fast browser-side render.':'This X post has no video. Upload your own video; it will occupy the video position.'} This Reel contains no Instagram UI.</div>`;
+      const video=card.querySelector('.reel-video-preview');
+      const bgLayer=card.querySelector('.reel-bg-layer');
+      const overlay=card.querySelector('.reel-overlay');
+      const textLayout=reelTextLayoutDetailed(tweet.text); const designId=group.reelDesignId;
+      const geom=reelVideoGeometry(textLayout,designId);
+      const bgSvg=`<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">${reelBackgroundSvg(reelDesign(designId),designId)}</svg>`; bgLayer.src=svgURL(bgSvg);
+      const overlaySvg=reelSvg(tweet,group.units,designId,true,'foreground'); overlay.src=svgURL(overlaySvg);
+      video.style.left=(geom.x/1080*100)+'%'; video.style.top=(geom.y/1920*100)+'%'; video.style.width=(geom.w/1080*100)+'%'; video.style.height=(geom.h/1920*100)+'%';
+      let objectUrl=''; let activeSrc=''; let remoteVideoUrl=videoMedia?.videoUrl || ((videoMedia?.url||'').match(/\.mp4(?:$|[?#])/i)?videoMedia.url:'');
+      function updateVideoLabel(){const label=card.querySelector('.reel-file-label');if(label) label.firstChild.textContent=activeSrc?'Replace video':'Upload video';}
+      function setVideo(src){
+        activeSrc=src||'';updateVideoLabel();
+        card.querySelector('.reel-download').disabled=!activeSrc;
+        if(!src){
+          if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl='';}
+          video.pause();video.removeAttribute('src');video.load();
+          card.querySelector('.reel-download').disabled=true;
+          return;
+        }
+        // Keep the source only on the currently active Reel card. This avoids
+        // four independent video decoders buffering/decoding the same X video.
+        video.src=src;video.muted=true;video.preload='auto';video.load();
+        video.onloadedmetadata=()=>{card.querySelector('.reel-download').disabled=false;};
+      }
+      const releaseInactivePlayers=()=>{
+        document.querySelectorAll('.reel-video-preview').forEach(v=>{
+          if(v!==video){v.pause();v.removeAttribute('src');v.load();v.preload='none';}
+        });
+      };
+      const playPreview=()=>{
+        if(document.hidden || !activeSrc) return;
+        releaseInactivePlayers();
+        if(!video.getAttribute('src') && video.dataset.lazySrc){
+          video.src=video.dataset.lazySrc;
+          video.muted=true;
+          video.preload='auto';
+          video.load();
+        } else video.preload='auto';
+        video.play().catch(()=>{});
+      };
+      const pausePreview=()=>{video.pause();};
+      video.addEventListener('click',()=>{if(video.paused)playPreview();else pausePreview();});
+      if('IntersectionObserver' in window){
+        window.__reelObserver=window.__reelObserver||new IntersectionObserver(entries=>{
+          const visible=entries.filter(e=>e.isIntersecting);
+          if(visible.length){
+            const best=visible.sort((a,b)=>{
+              const av=Math.abs(a.boundingClientRect.top+a.boundingClientRect.height/2-innerHeight/2);
+              const bv=Math.abs(b.boundingClientRect.top+b.boundingClientRect.height/2-innerHeight/2);
+              return av-bv;
+            })[0];
+            document.querySelectorAll('.reel-video-preview').forEach(v=>v.pause());
+            best.target.__playPreview?.();
+          } else if(!entries.some(e=>e.isIntersecting)) {
+            entries.forEach(e=>e.target.__pausePreview?.());
+          }
+        },{rootMargin:'80px 0px',threshold:.35});
+        video.__playPreview=playPreview;video.__pausePreview=pausePreview;window.__reelObserver.observe(video);
+      }else{video.addEventListener('canplay',playPreview,{once:true});}
+      card.querySelector('.reel-file').addEventListener('change',e=>{const f=e.target.files?.[0];if(!f)return;if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl='';}objectUrl=URL.createObjectURL(f);remoteVideoUrl='';setVideo(objectUrl);trackEvent('reel_video_uploaded',{size:f.size});});
+      card.querySelector('.reel-frame').addEventListener('click',async()=>{try{const b=await blobFromSvgSized(reelSvg(tweet,group.units,designId),'png',1080,1920);await downloadBlob(b,'tweetstudio-reel-frame-1080x1920.png');trackEvent('reel_frame_downloaded',{format:'png'});}catch(e){showError(e.message)}});
+      card.querySelector('.reel-download').addEventListener('click',async e=>{
+        const b=e.currentTarget;
+        if(b.disabled)return;
+        const quality=await chooseReelQuality();
+        if(!quality)return;
+        b.disabled=true;
+        try{await exportReel(card,video,tweet,group.units,textLayout,designId,remoteVideoUrl,false,quality)}catch(err){showError(err.message)}finally{b.disabled=false}
+      });
+      if(videoMedia?.videoUrl){
+        activeSrc='/api/asset?url='+encodeURIComponent(videoMedia.videoUrl);
+        updateVideoLabel();
+        video.dataset.lazySrc=activeSrc;
+        video.src=activeSrc;
+        video.preload='auto';
+        video.load();
+        card.querySelector('.reel-download').disabled=false;
+      }
+      gallery.appendChild(card);
+      if(videoMedia?.videoUrl){
+      }
+      if(!videoMedia?.videoUrl) updateVideoLabel();
+      return;
+    }
+    let active=0;const card=document.createElement('article');card.className='card';card.innerHTML=`<div class="card-head"><div><b>${group.template.name}</b><span>${group.template.desc}</span></div><div class="count">${group.slides.length} ${group.slides.length===1?'slide':'slides'}</div></div><div class="preview"><img></div><div class="card-foot"><div class="dots"></div><div class="controls"><button class="prev">←</button><span class="index">1/${group.slides.length}</span><button class="next">→</button><button class="small">Download</button></div></div>`;const img=card.querySelector('img'),dots=card.querySelector('.dots'),prev=card.querySelector('.prev'),next=card.querySelector('.next'),idx=card.querySelector('.index'),dl=card.querySelector('.small');function set(i){active=i;img.src=svgURL(group.slides[i].svg);idx.textContent=(i+1)+'/'+group.slides.length;prev.disabled=i===0;next.disabled=i===group.slides.length-1;[...dots.children].forEach((b,j)=>b.classList.toggle('on',j===i))}group.slides.forEach((_,i)=>{const b=document.createElement('button');if(i===0)b.className='on';b.addEventListener('click',()=>set(i));dots.appendChild(b)});prev.addEventListener('click',()=>set(Math.max(0,active-1)));next.addEventListener('click',()=>set(Math.min(group.slides.length-1,active+1)));dl.addEventListener('click',async()=>{dl.disabled=true;try{const fmt=document.getElementById('format').value;const size=getExportSize();const blob=await blobFromSvg(group.slides[active].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(active+1).padStart(2,'0')}-${size}x${size}.${fmt}`);trackEvent('theme_downloaded',{template:group.template.id,size:size,format:fmt})}catch(e){showError(e.message)}finally{dl.disabled=false}});set(0);gallery.appendChild(card)
+  });
+}
+async function fetchAssetBlob(src){
+  const r=await fetch('/api/asset?url='+encodeURIComponent(src));
+  if(!r.ok) throw new Error('Media download failed');
+  return await r.blob();
+}
+async function imageFromBlob(blob){
+  if('createImageBitmap' in window){
+    try{return await createImageBitmap(blob)}catch{}
+  }
+  const obj=URL.createObjectURL(blob);
+  try{
+    const img=new Image();
+    img.decoding='async';
+    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src=obj});
+    return img;
+  }finally{URL.revokeObjectURL(obj)}
+}
+async function makeSquareMediaBlob(src,format='png',size=1080){
+  const blob=await fetchAssetBlob(src);
+  const img=await imageFromBlob(blob);
+  const sw=img.width,sh=img.height;
+  if(!sw||!sh) throw new Error('Could not determine the original media dimensions.');
+  if(size<1||size>15360) throw new Error('Unsupported media export size.');
+
+  let c;
+  try{c=document.createElement('canvas');c.width=size;c.height=size}catch{
+    throw new Error(`Could not allocate a ${size.toLocaleString()}×${size.toLocaleString()} media export. Try a lower resolution.`);
+  }
+  const ctx=c.getContext('2d',{alpha:false});
+  if(!ctx) throw new Error('Canvas export is not available.');
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality='high';
+  ctx.fillStyle='#fff';
+  ctx.fillRect(0,0,size,size);
+
+  // Contain, never cover: every source pixel remains visible.
+  const scale=Math.min(size/sw,size/sh);
+  const dw=Math.round(sw*scale),dh=Math.round(sh*scale);
+  const dx=Math.round((size-dw)/2),dy=Math.round((size-dh)/2);
+  ctx.drawImage(img,dx,dy,dw,dh);
+
+  return await new Promise((resolve,reject)=>{
+    const mime=format==='jpeg'?'image/jpeg':'image/png';
+    const quality=format==='jpeg'?.98:undefined;
+    c.toBlob(b=>b?resolve(b):reject(new Error(`Media export at ${size.toLocaleString()}×${size.toLocaleString()} failed. Try a lower resolution.`)),mime,quality);
+  });
+}
+function openMediaZoom(src){
+  const modal=document.getElementById('mediaZoom'),img=document.getElementById('mediaZoomImg');
+  img.src=src; modal.hidden=false; document.body.style.overflow='hidden';
+}
+function closeMediaZoom(){
+  const modal=document.getElementById('mediaZoom'); modal.hidden=true; document.getElementById('mediaZoomImg').src=''; document.body.style.overflow='';
+}
+async function renderMedia(){
+  const sec=document.getElementById('mediaSection'),grid=document.getElementById('mediaGrid');grid.innerHTML='';
+  if(!tweet.media||!tweet.media.length){sec.hidden=true;return}
+  sec.hidden=false;
+  tweet.media.forEach((m,i)=>{
+    const card=document.createElement('div');
+    card.innerHTML=`<div class="media-square"><div class="media-bg"></div><img></div><div class="media-caption"><div><b>Media ${i+1}</b><span>${m.width&&m.height?m.width+'×'+m.height:'original'}</span></div><div class="media-actions"><select class="media-resolution" aria-label="Media export resolution"><option value="1080">Instagram 1:1</option><option value="4096">4K 1:1</option><option value="7680" selected>8K 1:1</option><option value="15360">16K 1:1</option></select><button class="download-square">Download</button><button class="download-original">Original</button></div></div>`;
+    card.querySelector('.media-bg').style.backgroundImage=`url("${m.url}")`;
+    const mediaImg=card.querySelector('img');
+    mediaImg.src=m.url;
+    mediaImg.addEventListener('click',()=>{trackEvent('media_previewed',{media_index:i+1});openMediaZoom(m.url)});
+    const sq=card.querySelector('.download-square'),orig=card.querySelector('.download-original');
+    sq.addEventListener('click',async()=>{sq.disabled=true;const size=Number(card.querySelector('.media-resolution').value||7680);try{const b=await makeSquareMediaBlob(m.url,'png',size);await downloadBlob(b,`tweetstudio-media-${String(i+1).padStart(2,'0')}-${size}x${size}.png`);trackEvent('media_downloaded',{media_index:i+1,size:size,format:'png'})}catch(e){showError(e.message)}finally{sq.disabled=false}});
+    orig.addEventListener('click',async()=>{orig.disabled=true;try{const b=await fetchAssetBlob(m.url);const ext=(b.type.split('/')[1]||'jpg').replace('jpeg','jpg');await downloadBlob(b,`tweetstudio-media-${String(i+1).padStart(2,'0')}-original.${ext}`);trackEvent('original_media_downloaded',{media_index:i+1})}catch(e){showError(e.message)}finally{orig.disabled=false}});
+    grid.appendChild(card);
+  });
+}
+async function prepareTweetAssets(){ /* no legacy template assets required */ }
+
+async function generateFromData(data,btn){
+  trackEvent('generation_started',{input_mode: document.getElementById('urlModeBtn').classList.contains('active')?'url':'text'});
+  btn.textContent='Generating…';
+  btn.disabled=true;
+  hideError();
+  try{
+    tweet={...data,creatorAvatar:'/ai-knowledge-profile.jpg'};
+    await prepareTweetAssets();
+    if(document.fonts?.ready) await document.fonts.ready;
+    renderPostMeta();
+    createResults();
+    renderMedia();
+    trackEvent('generation_completed',{templates:results.length,slides:results.reduce((n,g)=>n+(g.reel?1:g.slides.length),0),input_mode: document.getElementById('urlModeBtn').classList.contains('active')?'url':'text'});
+  }catch(e){
+    trackEvent('generation_failed',{input_mode: document.getElementById('urlModeBtn').classList.contains('active')?'url':'text'});
+    tweet=null;
+    renderPostMeta();
+    document.getElementById('gallery').innerHTML='';
+    document.getElementById('mediaSection').hidden=true;
+    document.getElementById('resultSummary').textContent='Your designs will appear here';
+    document.getElementById('downloadAllBtn').disabled=true;
+    showError(e.message);
+  }finally{
+    btn.textContent='Generate designs';
+    btn.disabled=false;
+  }
+}
+function setInputMode(mode){
+  const isUrl=mode==='url';
+  document.getElementById('urlModeBtn').classList.toggle('active',isUrl);
+  document.getElementById('textModeBtn').classList.toggle('active',!isUrl);
+  document.getElementById('urlModeBtn').setAttribute('aria-selected',String(isUrl));
+  document.getElementById('textModeBtn').setAttribute('aria-selected',String(!isUrl));
+  document.getElementById('urlPanel').hidden=!isUrl;
+  document.getElementById('textPanel').hidden=isUrl;
+  hideError();
+}
+function showError(m){const e=document.getElementById('error');e.hidden=false;e.textContent=m}function hideError(){document.getElementById('error').hidden=true}
+// Initialize the Settings control first so it remains functional even if another optional UI initializer fails.
+const settingsBtn=document.getElementById('settingsBtn');
+const settingsPanel=document.getElementById('settingsPanel');
+function toggleSettings(){
+  const willOpen=settingsPanel.hidden;
+  settingsPanel.hidden=!willOpen;
+  settingsBtn.setAttribute('aria-expanded',String(willOpen));
+  settingsBtn.textContent=willOpen?'Close settings':'Settings';
+  if(willOpen) settingsPanel.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+settingsBtn.setAttribute('aria-expanded','false');
+settingsBtn.addEventListener('click',toggleSettings);
+window.__outputTab='posts';
+function setOutputTab(tab){
+  window.__outputTab=tab;
+  document.getElementById('postsTab').classList.toggle('active',tab==='posts');
+  document.getElementById('reelsTab').classList.toggle('active',tab==='reels');
+  document.getElementById('postsTab').setAttribute('aria-selected',String(tab==='posts'));
+  document.getElementById('reelsTab').setAttribute('aria-selected',String(tab==='reels'));
+  renderResults();
+}
+document.getElementById('postsTab').addEventListener('click',()=>setOutputTab('posts'));
+document.getElementById('reelsTab').addEventListener('click',()=>setOutputTab('reels'));
+setupTemplateList();renderPostMeta();
+document.getElementById('closeMediaZoom').addEventListener('click',closeMediaZoom);document.getElementById('mediaZoom').addEventListener('click',e=>{if(e.target.id==='mediaZoom')closeMediaZoom();});document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMediaZoom();});
+document.getElementById('urlModeBtn').addEventListener('click',()=>{trackEvent('url_mode_used');setInputMode('url')});
+document.getElementById('textModeBtn').addEventListener('click',()=>{trackEvent('text_mode_used');setInputMode('text')});
+document.getElementById('generateBtn').addEventListener('click',async()=>{
+  const btn=document.getElementById('generateBtn');
+  try{const raw=document.getElementById('urlInput').value.trim();if(!raw)throw new Error('Paste an X/Twitter post URL first.');await generateFromData(await getTweet(raw),btn);}catch(e){showError(e.message);}
+});
+document.getElementById('urlInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.getElementById('generateBtn').click();}});
+document.getElementById('generateTextBtn').addEventListener('click',async()=>{
+  const btn=document.getElementById('generateTextBtn');
+  try{await generateFromData(await getTextPost(),btn);}catch(e){showError(e.message);}
+});
+document.getElementById('regenBtn').addEventListener('click',async()=>{if(tweet){if(document.fonts?.ready) await document.fonts.ready;createResults();renderMedia();}});
+
+document.getElementById('density').addEventListener('change',createResults);document.getElementById('resolution').addEventListener('change',updateSizePill);updateSizePill();
+document.getElementById('downloadAllBtn').addEventListener('click',async()=>{const fmt=document.getElementById('format').value;const size=getExportSize();const btn=document.getElementById('downloadAllBtn');btn.disabled=true;try{for(const group of results){if(group.reel)continue;for(let i=0;i<group.slides.length;i++){const blob=await blobFromSvg(group.slides[i].svg,fmt,size);await downloadBlob(blob,`tweetstudio-${group.template.id}-${String(i+1).padStart(2,'0')}-${size}x${size}.${fmt}`)}}trackEvent('download_all',{templates:results.filter(g=>!g.reel).length,size:size,format:fmt})}catch(e){showError(e.message)}finally{btn.disabled=false}});
+
+async function receiveStudioInput(){
+  if(location.hash!=='#from-studio')return;
+  try{
+    const raw=sessionStorage.getItem('tweetstudio.composer-input');
+    sessionStorage.removeItem('tweetstudio.composer-input');
+    history.replaceState(null,'','/classic');
+    if(!raw)return;
+    const seed=JSON.parse(raw);
+    if(typeof seed.text!=='string'||!seed.text.trim())return;
+    setInputMode('text');
+    document.getElementById('textInput').value=seed.text;
+    document.getElementById('textAuthor').value=String(seed.author||'');
+    document.getElementById('textHandle').value=String(seed.handle||'');
+    const data=await getTextPost();
+    if(typeof seed.sourceUrl==='string' && /^https:\/\/x\.com\/[a-zA-Z0-9_]{1,15}\/status\/\d{1,20}$/.test(seed.sourceUrl)){
+      try{const original=await getTweet(seed.sourceUrl);data.media=original.media;data.avatar=original.avatar}catch{}
+    }
+    await generateFromData(data,document.getElementById('generateTextBtn'));
+  }catch{showError('Open the source link or paste your text to begin.')}
+}
+receiveStudioInput();

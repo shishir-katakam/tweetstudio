@@ -1,120 +1,203 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const urlMod = require('url');
-const os = require('os');
-const crypto = require('crypto');
-const ROOT = path.join(__dirname, 'public');
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const { Readable, Transform } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
+const ROOT = path.join(__dirname, "public");
 const DEFAULT_PORT = Number(process.env.PORT || 4173);
 const MAX_PORT_ATTEMPTS = 100;
 
-function send(res, status, body, type='text/plain; charset=utf-8', extraHeaders={}) {
-  res.writeHead(status, {'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin',...extraHeaders});
+function send(
+  res,
+  status,
+  body,
+  type = "text/plain; charset=utf-8",
+  extraHeaders = {},
+) {
+  res.writeHead(status, {
+    "Content-Type": type,
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    ...extraHeaders,
+  });
   res.end(body);
 }
-function safePath(p){
-  const clean = path.normalize(p).replace(/^([.][.][/\\])+/, '');
-  return path.join(ROOT, clean === '/' ? 'index.html' : clean);
+const ORIGIN = "https://tweet.endiidishishir.qzz.io";
+const MEDIA_HOSTS = new Set([
+  "pbs.twimg.com",
+  "video.twimg.com",
+  "abs.twimg.com",
+]);
+const MAX_MEDIA = 96 * 1024 * 1024;
+const IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/avif",
+]);
+const importCache = new Map();
+const pending = new Map();
+let activeMedia = 0;
+function mediaUrl(raw) {
+  try {
+    const u = new URL(raw);
+    if (
+      u.protocol === "https:" &&
+      MEDIA_HOSTS.has(u.hostname) &&
+      !u.port &&
+      !u.username &&
+      !u.password
+    )
+      return u;
+  } catch {}
+  return null;
 }
-async function fetchJson(url){
-  const r=await fetch(url,{headers:{'User-Agent':'TweetStudio/1.1 (template renderer)'}});
-  const text=await r.text();
-  let data; try{data=JSON.parse(text)}catch{data=null}
-  return {r,data};
+async function boundedBytes(response, limit) {
+  if (
+    !response.body ||
+    Number(response.headers.get("content-length")) > limit
+  ) {
+    await response.body?.cancel();
+    throw Error("Response exceeds limit");
+  }
+  const parts = [];
+  let bytes = 0;
+  for await (const chunk of response.body) {
+    bytes += chunk.length;
+    if (bytes > limit) throw Error("Response exceeds limit");
+    parts.push(chunk);
+  }
+  return Buffer.concat(parts, bytes);
 }
-async function remoteDataUrl(src){
-  if(!src) return '';
-  if(src.startsWith('data:')) return src;
-  try{
-    const r=await fetch(src,{headers:{'User-Agent':'Mozilla/5.0'}});
-    if(!r.ok) return '';
-    const type=r.headers.get('content-type')||'image/jpeg';
-    const buf=Buffer.from(await r.arrayBuffer());
-    return `data:${type};base64,${buf.toString('base64')}`;
-  }catch{return ''}
+async function avatarImage(raw) {
+  const url = mediaUrl(raw);
+  if (!url) return "";
+  try {
+    const r = await fetch(url, {
+      redirect: "error",
+      signal: AbortSignal.timeout(4000),
+    });
+    const type = r.headers.get("content-type")?.split(";")[0];
+    if (!r.ok || !IMAGE_TYPES.has(type)) {
+      await r.body?.cancel();
+      return "";
+    }
+    const b = await boundedBytes(r, 256 * 1024);
+    return "data:" + type + ";base64," + b.toString("base64");
+  } catch {
+    return "";
+  }
 }
-async function handleTweet(req,res,parsed){
-  const q=parsed.query;
-  if(!q.handle || !q.id) return send(res,400,JSON.stringify({error:'Missing handle or status id.'}),'application/json');
-
-  const headers={
-    'User-Agent':'TweetStudio/2.0 (+template-renderer)',
-    'Accept':'application/json'
+async function lookup(q) {
+  const headers = {
+    "User-Agent": "TweetStudio/2.0 (+template-renderer)",
+    Accept: "application/json",
   };
 
   // FxTwitter's current API is v2. It returns the post in `status` and
   // always includes a `code` field, even when the HTTP status is 200.
   // Keep the legacy endpoint as a compatibility fallback.
-  const endpoints=[
+  const endpoints = [
     `https://api.fxtwitter.com/2/status/${encodeURIComponent(q.id)}`,
-    `https://api.fxtwitter.com/${encodeURIComponent(q.handle)}/status/${encodeURIComponent(q.id)}`
+    `https://api.fxtwitter.com/${encodeURIComponent(q.handle)}/status/${encodeURIComponent(q.id)}`,
   ];
 
-  let payload=null;
-  let lastProblem='The public post could not be retrieved.';
+  let payload = null;
 
-  for(const api of endpoints){
-    try{
-      const r=await fetch(api,{headers,redirect:'follow'});
-      const text=await r.text();
-      let j=null;
-      try{j=JSON.parse(text)}catch{}
-      const code=Number(j?.code ?? r.status);
-      const root=j?.status || j?.tweet || null;
-      if(r.ok && code>=200 && code<300 && root){
-        payload={j,root};
+  for (const api of endpoints) {
+    try {
+      const r = await fetch(api, {
+        headers,
+        redirect: "error",
+        signal: AbortSignal.timeout(5000),
+      });
+      const text = (await boundedBytes(r, 1024 * 1024)).toString("utf8");
+      let j = null;
+      try {
+        j = JSON.parse(text);
+      } catch {}
+      const code = Number(j?.code ?? r.status);
+      const root = j?.status || j?.tweet || null;
+      if (r.ok && code >= 200 && code < 300 && root) {
+        payload = { j, root };
         break;
       }
-      if(j?.message) lastProblem=j.message;
-    }catch(err){
-      lastProblem='Unable to reach the public X post data service.';
-    }
+    } catch {}
   }
 
-  if(!payload){
-    return send(res,502,JSON.stringify({error:`Could not retrieve this public X post. ${lastProblem}`}),'application/json');
+  if (!payload) {
+    throw Error("Public post unavailable");
   }
 
-  const {j,root}=payload;
-  const a=root.author || j.author || {};
-  const name=a.name || a.display_name || q.handle;
-  const handle=String(a.screen_name || a.username || q.handle).replace(/^@/,'');
-  const avatar=(a.avatar_url || a.avatar || '').replace('_normal','_400x400');
+  const { j, root } = payload;
+  const a = root.author || j.author || {};
+  const name = a.name || a.display_name || q.handle;
+  const handle = String(a.screen_name || a.username || q.handle).replace(
+    /^@/,
+    "",
+  );
+  const avatar = (a.avatar_url || a.avatar || "").replace(
+    "_normal",
+    "_400x400",
+  );
 
-  const mediaObj=root.media || {};
-  const chooseVideoUrl=(m={})=>{
-    let formats=Array.isArray(m.formats)?m.formats:[];
-    if(formats && !Array.isArray(formats) && typeof formats==='object') formats=Object.values(formats);
-    const mp4=formats.filter(f=>f && String(f.container||'').toLowerCase()==='mp4' && f.url);
+  const mediaObj = root.media || {};
+  const chooseVideoUrl = (m = {}) => {
+    let formats = Array.isArray(m.formats) ? m.formats : [];
+    if (formats && !Array.isArray(formats) && typeof formats === "object")
+      formats = Object.values(formats);
+    const mp4 = formats.filter(
+      (f) => f && String(f.container || "").toLowerCase() === "mp4" && f.url,
+    );
     // Prefer the best available resolution, but avoid unnecessarily huge
     // bitrate variants. Reel output is 1080x1920, so a <=6 Mbps source is
     // normally more than enough and downloads substantially faster.
-    mp4.sort((a,b)=>{
-      const ar=(Number(a.width)||0)*(Number(a.height)||0), br=(Number(b.width)||0)*(Number(b.height)||0);
-      if(ar!==br) return br-ar;
-      const ab=Number(a.bitrate)||0, bb=Number(b.bitrate)||0;
-      const at=ab>6000000?ab-6000000:0, bt=bb>6000000?bb-6000000:0;
-      return at-bt || ab-bb;
+    mp4.sort((a, b) => {
+      const ar = (Number(a.width) || 0) * (Number(a.height) || 0),
+        br = (Number(b.width) || 0) * (Number(b.height) || 0);
+      if (ar !== br) return br - ar;
+      const ab = Number(a.bitrate) || 0,
+        bb = Number(b.bitrate) || 0;
+      const at = ab > 6000000 ? ab - 6000000 : 0,
+        bt = bb > 6000000 ? bb - 6000000 : 0;
+      return at - bt || ab - bb;
     });
-    const legacyVariants=Array.isArray(m.video_info?.variants)?m.video_info.variants:[];
-    const legacyMp4=legacyVariants.filter(v=>v?.url && /\.mp4(?:$|[?#])/i.test(v.url));
-    legacyMp4.sort((a,b)=>(Number(b.bitrate)||0)-(Number(a.bitrate)||0));
-    return String(mp4[0]?.url || legacyMp4[0]?.url || m.url || m.transcode_url || m.media_url_https || '').trim();
+    const legacyVariants = Array.isArray(m.video_info?.variants)
+      ? m.video_info.variants
+      : [];
+    const legacyMp4 = legacyVariants.filter(
+      (v) => v?.url && /\.mp4(?:$|[?#])/i.test(v.url),
+    );
+    legacyMp4.sort(
+      (a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0),
+    );
+    return String(
+      mp4[0]?.url ||
+        legacyMp4[0]?.url ||
+        m.url ||
+        m.transcode_url ||
+        m.media_url_https ||
+        "",
+    ).trim();
   };
-  const normalizeMedia=(m)=>{
-    if(!m) return null;
-    const type=String(m.type||'').toLowerCase();
-    const isVideo=type==='video'||type==='gif'||type==='animated_gif';
-    const videoUrl=isVideo?chooseVideoUrl(m):'';
-    const url=String(m.thumbnail_url || (isVideo ? videoUrl : m.url) || '').trim();
-    if(!url && !videoUrl) return null;
+  const normalizeMedia = (m) => {
+    if (!m) return null;
+    const type = String(m.type || "").toLowerCase();
+    const isVideo =
+      type === "video" || type === "gif" || type === "animated_gif";
+    const videoUrl = isVideo ? chooseVideoUrl(m) : "";
+    const url = String(
+      m.thumbnail_url || (isVideo ? videoUrl : m.url) || "",
+    ).trim();
+    if (!url && !videoUrl) return null;
     return {
-      url:url||videoUrl,
+      url: url || videoUrl,
       videoUrl,
-      width:Number(m.width||m.original_info?.width||0)||undefined,
-      height:Number(m.height||m.original_info?.height||0)||undefined,
-      duration:Number(m.duration||0)||undefined,
-      type:isVideo?'video':(type||'photo')
+      width: Number(m.width || m.original_info?.width || 0) || undefined,
+      height: Number(m.height || m.original_info?.height || 0) || undefined,
+      duration: Number(m.duration || 0) || undefined,
+      type: isVideo ? "video" : type || "photo",
     };
   };
 
@@ -122,221 +205,292 @@ async function handleTweet(req,res,parsed){
   // convenience collection whose shape has changed across API revisions.
   // Prefer the dedicated video array so we never mistake a thumbnail/photo
   // URL for the playable MP4. Keep `all` as a fallback for older responses.
-  const videos=Array.isArray(mediaObj.videos)?mediaObj.videos:[];
-  const photos=Array.isArray(mediaObj.photos)?mediaObj.photos:[];
-  const allMedia=Array.isArray(mediaObj.all)?mediaObj.all:[];
-  const external=mediaObj.external?[mediaObj.external]:[];
+  const videos = Array.isArray(mediaObj.videos) ? mediaObj.videos : [];
+  const photos = Array.isArray(mediaObj.photos) ? mediaObj.photos : [];
+  const allMedia = Array.isArray(mediaObj.all) ? mediaObj.all : [];
+  const external = mediaObj.external ? [mediaObj.external] : [];
   // Compatibility with older/alternate FxTwitter payloads.
-  const legacyEntities=Array.isArray(root.extended_entities?.media)?root.extended_entities.media:[];
-  const legacyEntities2=Array.isArray(root.entities?.media)?root.entities.media:[];
-  const normalizedVideos=videos.map(normalizeMedia).filter(m=>m?.videoUrl);
-  const normalizedAll=allMedia.map(normalizeMedia).filter(Boolean);
-  const normalizedPhotos=photos.map(normalizeMedia).filter(Boolean);
-  const normalizedExternal=external.map(normalizeMedia).filter(m=>m?.videoUrl);
-  const normalizedLegacy=legacyEntities.concat(legacyEntities2).map(normalizeMedia).filter(m=>m?.videoUrl);
+  const legacyEntities = Array.isArray(root.extended_entities?.media)
+    ? root.extended_entities.media
+    : [];
+  const legacyEntities2 = Array.isArray(root.entities?.media)
+    ? root.entities.media
+    : [];
+  const normalizedVideos = videos
+    .map(normalizeMedia)
+    .filter((m) => m?.videoUrl);
+  const normalizedAll = allMedia.map(normalizeMedia).filter(Boolean);
+  const normalizedPhotos = photos.map(normalizeMedia).filter(Boolean);
+  const normalizedExternal = external
+    .map(normalizeMedia)
+    .filter((m) => m?.videoUrl);
+  const normalizedLegacy = legacyEntities
+    .concat(legacyEntities2)
+    .map(normalizeMedia)
+    .filter((m) => m?.videoUrl);
 
   // Keep one canonical media array, with real playable video URLs first.
   // This makes the Reel composer resilient to FxTwitter response variants.
-  const media=[...normalizedVideos,...normalizedExternal,...normalizedLegacy,...normalizedAll,...normalizedPhotos]
-    .filter((m,i,a)=>m && (m.videoUrl || m.url) && i===a.findIndex(x=>x.videoUrl===m.videoUrl && x.url===m.url));
-  const avatarData=await remoteDataUrl(avatar);
-  const out={
-    url:root.url||`https://x.com/${q.handle}/status/${q.id}`,
-    authorName:name,
-    handle:'@'+handle,
-    avatar:avatarData||avatar||'',
-    text:root.text||root.raw_text?.text||'',
-    media
+  const media = [
+    ...normalizedVideos,
+    ...normalizedExternal,
+    ...normalizedLegacy,
+    ...normalizedAll,
+    ...normalizedPhotos,
+  ].filter(
+    (m, i, a) =>
+      m &&
+      (m.videoUrl || m.url) &&
+      i === a.findIndex((x) => x.videoUrl === m.videoUrl && x.url === m.url),
+  );
+  const avatarData = await avatarImage(avatar);
+  const out = {
+    url: root.url || `https://x.com/${q.handle}/status/${q.id}`,
+    authorName: name,
+    handle: "@" + handle,
+    avatar: avatarData || mediaUrl(avatar)?.href || "",
+    text: root.text || root.raw_text?.text || "",
+    media: media
+      .filter((m) => mediaUrl(m.url) && (!m.videoUrl || mediaUrl(m.videoUrl)))
+      .slice(0, 16),
   };
-  if(!out.text.trim()) return send(res,502,JSON.stringify({error:'The post was retrieved but contains no readable public text.'}),'application/json');
-  send(res,200,JSON.stringify(out),'application/json');
+  if (typeof out.text !== "string" || !out.text.trim())
+    throw Error("No readable text");
+  return JSON.stringify(out);
 }
-async function handleAsset(req,res,parsed){
-  const src=parsed.query.url;
-  if(!src || !/^https?:\/\//i.test(src)) return send(res,400,'Invalid asset URL');
-  try{
-    // Proxy media with HTTP Range support. Browsers use byte ranges for smooth
-    // video playback/seeking; buffering the entire remote video first causes
-    // stalls, especially when several Reel previews are visible.
-    const headers={'User-Agent':'Mozilla/5.0'};
-    if(req.headers.range) headers.Range=req.headers.range;
-    const r=await fetch(src,{headers,redirect:'follow'});
-    if(!r.ok && r.status!==206) return send(res,502,'Asset unavailable');
-    const type=r.headers.get('content-type')||'application/octet-stream';
-    const outHeaders={
-      'Content-Type':type,
-      'Cache-Control':'public, max-age=3600, immutable',
-      'Accept-Ranges':r.headers.get('accept-ranges')||'bytes',
-      'Access-Control-Allow-Origin':'*'
-    };
-    for(const name of ['content-length','content-range','etag','last-modified']){
-      const value=r.headers.get(name); if(value) outHeaders[name.split('-').map((x,i)=>i?x[0].toUpperCase()+x.slice(1):x).join('-')]=value;
+async function handleTweet(res, params) {
+  const id = params.get("id"),
+    handle = params.get("handle");
+  if (
+    !/^\d{1,20}$/.test(id || "") ||
+    !/^[A-Za-z0-9_]{1,15}$/.test(handle || "")
+  )
+    return send(
+      res,
+      400,
+      '{"error":"Invalid public post identifier."}',
+      "application/json",
+    );
+  let item = importCache.get(id);
+  if (!item || item.expires < Date.now()) {
+    if (!pending.has(id)) {
+      if (pending.size >= 24)
+        return send(
+          res,
+          503,
+          '{"error":"The importer is busy. Try again shortly."}',
+          "application/json",
+          { "Retry-After": "5" },
+        );
+      pending.set(
+        id,
+        lookup({ id, handle })
+          .then((body) => {
+            if (importCache.size >= 48)
+              importCache.delete(importCache.keys().next().value);
+            const data = { body, expires: Date.now() + 60000 };
+            importCache.set(id, data);
+            return data;
+          })
+          .finally(() => pending.delete(id)),
+      );
     }
-    res.writeHead(r.status===206?206:200,outHeaders);
-    if(req.method==='HEAD' || !r.body){res.end();return;}
-    const {Readable}=require('stream');
-    Readable.fromWeb(r.body).pipe(res);
-  }catch(err){
-    if(!res.headersSent) return send(res,502,'Asset unavailable');
-    try{res.destroy(err)}catch{}
+    try {
+      item = await pending.get(id);
+    } catch {
+      return send(
+        res,
+        502,
+        '{"error":"Public post unavailable. Try pasting the text."}',
+        "application/json",
+      );
+    }
   }
-}
-
-async function streamCachedReel(res, key, filename){
-  const file=path.join(REEL_CACHE_DIR,`${key}.mp4`);
-  const stat=await fs.promises.stat(file);
-  res.writeHead(200,{'Content-Type':'video/mp4','Content-Length':String(stat.size),'Content-Disposition':`attachment; filename="${filename}"`,'Cache-Control':'private, max-age=300','X-Content-Type-Options':'nosniff'});
-  fs.createReadStream(file).pipe(res);
-}
-
-async function cacheRemoteVideo(sourceUrl){
-  await ensureReelCacheDir();
-  const key=hashKey('source:'+sourceUrl);
-  const file=path.join(REEL_CACHE_DIR,`${key}.src`);
-  try{
-    const st=await fs.promises.stat(file);
-    if(Date.now()-st.mtimeMs < REEL_CACHE_MAX_AGE && st.size>0) return file;
-  }catch{}
-  const r=await fetch(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0'},redirect:'follow'});
-  if(!r.ok) throw new Error(`Video source returned HTTP ${r.status}.`);
-  const buf=Buffer.from(await r.arrayBuffer());
-  if(!buf.length) throw new Error('The remote video was empty.');
-  await fs.promises.writeFile(file,buf);
-  return file;
-}
-
-async function handleReelSourceCache(req,res,parsed){
-  const src=String(parsed.query.url||'');
-  if(!/^https?:\/\//i.test(src)) return send(res,400,'Invalid source video URL');
-  try{ const file=await cacheRemoteVideo(src); return send(res,200,JSON.stringify({ready:true,size:(await fs.promises.stat(file)).size}),'application/json'); }
-  catch(err){ return send(res,502,`Video source could not be cached: ${err.message}`); }
-}
-
-async function handleReelDownload(req,res,parsed){
-  const key=String(parsed.query.key||'').replace(/[^a-f0-9]/gi,'');
-  if(key.length!==64) return send(res,400,'Invalid Reel download key');
-  const file=path.join(REEL_CACHE_DIR,`${key}.mp4`);
-  try{
-    const st=await fs.promises.stat(file);
-    if(Date.now()-st.mtimeMs > REEL_CACHE_MAX_AGE) return send(res,410,'Reel cache expired.');
-    const design=String(parsed.query.design||'reel').replace(/[^a-z0-9_-]/gi,'')||'reel';
-    await streamCachedReel(res,key,`tweetstudio-reel-${design}.mp4`);
-  }catch{ send(res,404,'Reel is not ready.'); }
-}
-
-async function handleReelExport(req,res){
-  if(req.method!=='POST') return send(res,405,'Method not allowed');
-  try{
-    const chunks=[]; for await (const chunk of req) chunks.push(chunk);
-    const body=JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}');
-    const sourceUrl=String(body.sourceUrl||'');
-    const overlayPng=String(body.overlayPng||'');
-    const videoW=Math.round(Number(body.videoW)||760);
-    const videoH=Math.round(Number(body.videoH)||600);
-    const videoX=Math.round(Number(body.videoX)||64);
-    const videoY=Math.round(Number(body.videoY)||700);
-    const warmOnly=String(req.headers['x-reel-warm']||'')==='1';
-    if(!/^https?:\/\//i.test(sourceUrl)) return send(res,400,'Invalid source video URL');
-    if(!/^data:image\/png;base64,/i.test(overlayPng)) return send(res,400,'Invalid Reel overlay image');
-    await ensureReelCacheDir();
-    const key=hashKey([sourceUrl,overlayPng.slice(0,80),videoW,videoH,videoX,videoY,FFMPEG_ENCODER].join('|'));
-    const outPath=path.join(REEL_CACHE_DIR,`${key}.mp4`);
-    try{
-      const st=await fs.promises.stat(outPath);
-      if(Date.now()-st.mtimeMs < REEL_CACHE_MAX_AGE && st.size>0){
-        return send(res,200,JSON.stringify({ready:true,downloadUrl:`/api/reel-download?key=${key}&design=${encodeURIComponent(String(body.designId||'reel'))}`}),'application/json');
-      }
-    }catch{}
-
-    const sourcePath=await cacheRemoteVideo(sourceUrl);
-    const overlayPath=path.join(REEL_CACHE_DIR,`${key}.png`);
-    const m=overlayPng.match(/^data:image\/png;base64,(.*)$/i);
-    await fs.promises.writeFile(overlayPath,Buffer.from(m[1],'base64'));
-
-    const vfit=`[0:v]scale=${videoW}:${videoH}:force_original_aspect_ratio=decrease,pad=${videoW}:${videoH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vfit];[vfit][1:v]overlay=0:0:eof_action=endall:shortest=1[v]`;
-    let videoArgs=[];
-    if(FFMPEG_ENCODER==='h264_nvenc') videoArgs=['-c:v','h264_nvenc','-preset','p1','-tune','ll','-rc','constqp','-qp','28'];
-    else if(FFMPEG_ENCODER==='h264_qsv') videoArgs=['-c:v','h264_qsv','-preset','veryfast','-global_quality','28'];
-    else if(FFMPEG_ENCODER==='h264_amf') videoArgs=['-c:v','h264_amf','-quality','speed','-rc','cqp','-qp_i','28','-qp_p','28'];
-    else videoArgs=['-c:v','libx264','-preset','ultrafast','-crf','28','-tune','zerolatency'];
-    const args=[
-      '-hide_banner','-loglevel','error','-threads','0',
-      '-i',sourcePath,
-      '-loop','1','-framerate','30','-i',overlayPath,
-      '-filter_complex',vfit,
-      '-map','[v]','-map','0:a?',...videoArgs,
-      '-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-shortest','-f','mp4',outPath
-    ];
-    await new Promise((resolve,reject)=>{
-      const child=spawn(FFMPEG_BIN,args,{stdio:['ignore','ignore','pipe']}); let err='';
-      child.stderr.on('data',d=>err+=d.toString());
-      child.on('error',e=>{ if(e.code==='ENOENT') reject(new Error('FFmpeg is unavailable.')); else reject(e); });
-      child.on('close',code=>code===0?resolve():reject(new Error(err.trim()||`ffmpeg exited with code ${code}`)));
-    });
-    try{await fs.promises.unlink(overlayPath)}catch{}
-    const st=await fs.promises.stat(outPath);
-    if(!st.size) throw new Error('The Reel export was empty.');
-    const downloadUrl=`/api/reel-download?key=${key}&design=${encodeURIComponent(String(body.designId||'reel'))}`;
-    return send(res,200,JSON.stringify({ready:true,size:st.size,downloadUrl,warmed:warmOnly}),'application/json');
-  }catch(err){ return send(res,500,`Reel export failed: ${err.message}`); }
-}
-
-const server=http.createServer(async(req,res)=>{
-  const parsed=urlMod.parse(req.url,true);
-  if(parsed.pathname==='/api/tweet') return handleTweet(req,res,parsed);
-  if(parsed.pathname==='/api/asset') return handleAsset(req,res,parsed);
-  if(parsed.pathname==='/api/reel-source-cache') return handleReelSourceCache(req,res,parsed);
-  if(parsed.pathname==='/api/reel-download') return handleReelDownload(req,res,parsed);
-  if(parsed.pathname==='/api/reel-export') return handleReelExport(req,res);
-  if(parsed.pathname==='/robots.txt'){
-    const base=(process.env.SITE_URL||`http://${req.headers.host||'localhost:'+DEFAULT_PORT}`).replace(/\/$/,'');
-    const body=`User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: ${base}/sitemap.xml\n`;
-    return send(res,200,body,'text/plain; charset=utf-8');
-  }
-  if(parsed.pathname==='/sitemap.xml'){
-    const base=(process.env.SITE_URL||`http://${req.headers.host||'localhost:'+DEFAULT_PORT}`).replace(/\/$/,'');
-    const urls=['/','/tweet-to-instagram','/x-to-instagram','/tweet-to-reel']; const body=`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(u=>`<url><loc>${base}${u}</loc></url>`).join('')}</urlset>`;
-    return send(res,200,body,'application/xml; charset=utf-8');
-  }
-  if(req.method!=='GET') return send(res,405,'Method not allowed');
-  let p=safePath(parsed.pathname||'/');
-  if(!p.startsWith(ROOT)) return send(res,403,'Forbidden');
-  if(path.extname(p)==='' && fs.existsSync(p+'.html')) p=p+'.html';
-  fs.stat(p,(err,st)=>{
-    if(err || !st.isFile()) p=path.join(ROOT,'index.html');
-    const ext=path.extname(p).toLowerCase();
-    const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg'};
-    fs.readFile(p,(e,data)=>{
-      if(e) return send(res,500,'Server error');
-      if(ext==='.html'){
-        const proto=(req.headers['x-forwarded-proto']||'http').split(',')[0].trim();
-        const host=req.headers.host||`localhost:${DEFAULT_PORT}`;
-        const origin=(process.env.SITE_URL||`${proto}://${host}`).replace(/\/$/,'');
-        data=Buffer.from(data.toString().replaceAll('__SITE_ORIGIN__',origin));
-      }
-      send(res,200,data,types[ext]||'application/octet-stream', ext==='.html'?{}:{'Cache-Control':'public, max-age=86400'});
-    });
+  return send(res, 200, item.body, "application/json", {
+    "Cache-Control": "public, max-age=30, s-maxage=60",
   });
-});
-function startServer(startPort, attempts = 0) {
-  const port = startPort + attempts;
-  const onError = (err) => {
-    server.off('error', onError);
-    if (err && err.code === 'EADDRINUSE' && attempts < MAX_PORT_ATTEMPTS) {
-      console.log(`Port ${port} is already in use. Trying ${port + 1}...`);
-      setImmediate(() => startServer(startPort, attempts + 1));
+}
+async function handleAsset(req, res, params) {
+  const src = mediaUrl(params.get("url"));
+  if (!src) return send(res, 400, "Use a public X media URL.");
+  if (activeMedia >= 12)
+    return send(
+      res,
+      503,
+      "Media service busy. Try again shortly.",
+      "text/plain",
+      { "Retry-After": "5" },
+    );
+  const headers = {};
+  if (req.headers.range) {
+    if (!/^bytes=(?:\d+-\d*|-\d+)$/.test(req.headers.range))
+      return send(res, 416, "Unsupported range");
+    headers.Range = req.headers.range;
+  }
+  activeMedia++;
+  const cancel = new AbortController();
+  res.once("close", () => cancel.abort());
+  try {
+    const r = await fetch(src, {
+      headers,
+      redirect: "error",
+      signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(30000)]),
+    });
+    const type = r.headers.get("content-type")?.split(";")[0],
+      length = r.headers.get("content-length");
+    if (
+      !r.ok ||
+      !(IMAGE_TYPES.has(type) || type === "video/mp4") ||
+      Number(length) > MAX_MEDIA
+    ) {
+      await r.body?.cancel();
+      return send(res, 502, "Media unavailable.");
+    }
+    const h = {
+      "Content-Type": type,
+      "Cache-Control": "public, max-age=600, s-maxage=3600",
+      "Accept-Ranges": "bytes",
+    };
+    if (length) h["Content-Length"] = length;
+    if (r.headers.has("content-range"))
+      h["Content-Range"] = r.headers.get("content-range");
+    res.writeHead(r.status, h);
+    if (req.method === "HEAD") {
+      await r.body?.cancel();
+      res.end();
       return;
     }
-    console.error('Unable to start TweetStudio:', err);
-    process.exitCode = 1;
-  };
-  server.once('error', onError);
-  server.listen(port, () => {
-    console.log(`TweetStudio running at http://localhost:${port}`);
-    if (port !== startPort) {
-      console.log(`The default port ${startPort} was busy, so TweetStudio automatically selected ${port}.`);
-    }
-  });
+    let bytes = 0;
+    const limit = new Transform({
+      transform(chunk, enc, next) {
+        bytes += chunk.length;
+        next(bytes > MAX_MEDIA ? Error("Media limit reached") : null, chunk);
+      },
+    });
+    await pipeline(Readable.fromWeb(r.body), limit, res);
+  } catch {
+    if (!res.headersSent && !res.destroyed)
+      send(res, 502, "Media unavailable.");
+    else res.destroy();
+  } finally {
+    activeMedia--;
+  }
 }
-
-startServer(DEFAULT_PORT);
+const pages = [
+  "/",
+  "/tweet-to-instagram",
+  "/x-to-instagram",
+  "/tweet-to-reel",
+  "/linkedin-carousel-maker",
+  "/pinterest-pin-maker",
+  "/youtube-shorts-maker",
+];
+const types = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".jpg": "image/jpeg",
+  ".webp": "image/webp",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json",
+  ".txt": "text/plain; charset=utf-8",
+};
+const security =
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+async function route(req, res) {
+  const u = new URL(req.url, ORIGIN),
+    p = decodeURIComponent(u.pathname);
+  const classic = p === "/classic" || p === "/classic.html";
+  const guide = pages.slice(1).some((k) => p === k || p === k + ".html");
+  let csp = security;
+  if (classic)
+    csp =
+      "default-src 'self'; script-src 'self' https://esm.unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://pbs.twimg.com https://video.twimg.com https://abs.twimg.com; media-src 'self' blob: https://video.twimg.com; worker-src 'self' blob:; connect-src 'self' blob: https://esm.unpkg.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+  else if (guide)
+    csp = csp.replace("style-src 'self'", "style-src 'self' 'unsafe-inline'");
+  res.setHeader("Content-Security-Policy", csp);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=()",
+  );
+  if (req.method !== "GET" && req.method !== "HEAD")
+    return send(res, 405, "Method not allowed", "text/plain", {
+      Allow: "GET, HEAD",
+    });
+  if (p === "/api/tweet") return handleTweet(res, u.searchParams);
+  if (p === "/api/asset") return handleAsset(req, res, u.searchParams);
+  if (p.startsWith("/api/")) return send(res, 404, "Not found");
+  if (p === "/robots.txt")
+    return send(
+      res,
+      200,
+      "User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: " +
+        ORIGIN +
+        "/sitemap.xml\n",
+      "text/plain",
+      { "Cache-Control": "public, max-age=3600" },
+    );
+  if (p === "/sitemap.xml")
+    return send(
+      res,
+      200,
+      '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+        pages.map((k) => "<url><loc>" + ORIGIN + k + "</loc></url>").join("") +
+        "</urlset>",
+      "application/xml",
+      { "Cache-Control": "public, max-age=3600" },
+    );
+  if (p.includes("\0") || p.split("/").some((k) => k.startsWith(".")))
+    return send(res, 404, "Not found");
+  let file = path.resolve(ROOT, "." + (p === "/" ? "/index.html" : p));
+  if (!file.startsWith(ROOT + path.sep)) return send(res, 404, "Not found");
+  if (!path.extname(file)) file += ".html";
+  const ext = path.extname(file),
+    type = types[ext];
+  if (!type) return send(res, 404, "Not found");
+  let stat;
+  try {
+    stat = await fs.promises.stat(file);
+  } catch {
+    return send(res, 404, "Not found");
+  }
+  if (!stat.isFile()) return send(res, 404, "Not found");
+  const etag =
+    '"' +
+    stat.size.toString(16) +
+    "-" +
+    Math.floor(stat.mtimeMs).toString(16) +
+    '"';
+  const headers = {
+    "Content-Type": type,
+    ETag: etag,
+    "Cache-Control":
+      ext === ".html"
+        ? "public, max-age=0, s-maxage=60, stale-while-revalidate=120"
+        : "public, max-age=300, s-maxage=3600",
+  };
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  res.writeHead(200, headers);
+  if (req.method === "HEAD") return res.end();
+  await pipeline(fs.createReadStream(file), res);
+}
+const server = http.createServer((req, res) =>
+  route(req, res).catch(() => {
+    if (!res.headersSent && !res.destroyed)
+      send(res, 400, "Request could not be completed");
+    else res.destroy();
+  }),
+);
+server.headersTimeout = 15000;
+server.requestTimeout = 30000;
+server.listen(DEFAULT_PORT, () =>
+  console.log("Tweet Studio listening on port " + DEFAULT_PORT),
+);
