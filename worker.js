@@ -12,25 +12,12 @@ function json(data, status=200, extra={}) {
   return new Response(JSON.stringify(data), {status, headers:{...JSON_HEADERS,...extra}});
 }
 
-async function sha256(text) {
-  const bytes = new TextEncoder().encode(text);
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-
-function todayKey() {
-  return new Date().toISOString().slice(0,10);
-}
-
-async function visitorId(request, env) {
-  const cookie = request.headers.get('cookie') || '';
-  const m = cookie.match(/(?:^|;\\s*)ts_vid=([^;]+)/);
-  if (m?.[1]) return {id: decodeURIComponent(m[1]), isNew:false};
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const ua = request.headers.get('User-Agent') || '';
-  const salt = env.VISITOR_SALT || 'tweetstudio-public-stats';
-  const id = await sha256(`${salt}|${ip}|${ua}`);
-  return {id, isNew:true};
+function visitorId(request) {
+  const cookie=request.headers.get('cookie')||'';
+  const match=cookie.match(/(?:^|;\s*)ts_vid=([0-9a-f]{64})(?=;|$)/i);
+  if(match)return {id:match[1],isNew:false};
+  const bytes=crypto.getRandomValues(new Uint8Array(32));
+  return {id:Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(''),isNew:true};
 }
 
 async function increment(db, key, amount=1) {
@@ -44,7 +31,7 @@ async function handleEvent(request, env) {
   const allowed = new Set(['pageview','generation_completed','theme_downloaded','download_all','media_downloaded','original_media_downloaded']);
   if (!allowed.has(name)) return json({ok:true});
 
-  const v = await visitorId(request, env);
+  const v = visitorId(request);
   const now = Date.now();
   if (v.isNew) {
     await dbInsertVisitor(env.DB, v.id, now);
@@ -60,8 +47,8 @@ async function handleEvent(request, env) {
   await env.DB.prepare("INSERT INTO meta(key,value) VALUES('updated_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(new Date(now).toISOString()).run().catch(async()=>{
     await env.DB.prepare("INSERT INTO meta(key,value) VALUES('updated_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(new Date(now).toISOString()).run();
   });
-  const headers = v.isNew ? {'Set-Cookie':`ts_vid=${encodeURIComponent(v.id)}; Max-Age=31536000; Path=/; SameSite=Lax; Secure`} : {};
-  return json({ok:true},200,headers);
+  const headers = v.isNew ? {'Set-Cookie':`ts_vid=${encodeURIComponent(v.id)}; Max-Age=31536000; Path=/; SameSite=Lax; Secure; HttpOnly`} : {};
+  return json({ok:true},200,{...headers,'cache-control':'private, no-store'});
 }
 async function dbInsertVisitor(db,id,now){
   await db.prepare('INSERT OR IGNORE INTO visitors(visitor_id,first_seen) VALUES(?,?)').bind(id,now).run();
