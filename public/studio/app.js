@@ -1,7 +1,7 @@
 import {
   styles,
   platforms,
-  sizes,
+  sizes, dimensions, durationFor,
   thumbnail,
   loadArt,
   loadAvatar,
@@ -9,6 +9,7 @@ import {
   render,
 } from "./render.js";
 import { exportSet, videoType } from "./export.js";
+import {openAttachment,releaseAttachment,draftMedia} from "./media.js";
 const $ = (id) => document.getElementById(id);
 const paths = {
   studio: "M4 4h7v7H4z M14 4h6v4h-6z M14 11h6v9h-6z M4 14h7v6H4z",
@@ -69,7 +70,7 @@ const defaultState = {
   kind: "Post",
   size: "Square",
   style: "cobalt",
-  sample: true,
+  sample: true, seconds:3, durations:{}, quality:"Standard",includeAudio:true,
 };
 let state = { ...defaultState },
   page = 0,
@@ -140,16 +141,69 @@ function mode(m) {
     $("import").disabled = false;
   }
 }
+let ticket=0,previewTimer=0;
+function halt(){clearInterval(previewTimer);previewTimer=0;state.attachment?.element?.pause?.();$('play').textContent='Play reel'}
+function resetAsset(){halt();ticket++;releaseAttachment(state.attachment);delete state.attachment;$('file').value='';$('assetStatus').textContent=''}
+async function attach(file){
+  const n=++ticket;$('assetStatus').textContent='Opening media…';
+  try{const asset=await openAttachment(file);if(n!==ticket){releaseAttachment(asset);return}
+    halt();releaseAttachment(state.attachment);state.attachment=asset;$('mediaOptions').open=true;$('assetStatus').textContent='';paint()
+  }catch(e){if(n===ticket)$('assetStatus').textContent=e.message}
+}
+$('file').onchange=()=>{const f=$('file').files[0];if(f)attach(f)};
+$('removeAsset').onclick=()=>{resetAsset();paint()};
+$('audio').onchange=()=>state.includeAudio=$('audio').checked;
+function sourceMedia(){
+  const box=$('sourceMedia');box.replaceChildren();(state.importedMedia||[]).forEach((m,i)=>{
+    box.append(btn('Use post '+(m.videoUrl?'video ':'image ')+(i+1),async e=>{
+      const n=++ticket,b=e.currentTarget;b.disabled=true;
+      try{const r=await fetch('/api/asset?'+new URLSearchParams({url:m.videoUrl||m.url}));
+        if(!r.ok)throw Error('Could not retrieve the original media.');
+        const blob=await r.blob();if(n===ticket)await attach(new File([blob],'Post media '+(i+1),{type:blob.type}))
+      }catch(e){if(n===ticket)$('assetStatus').textContent=e.message}finally{b.disabled=false}
+    }))
+  })
+}
+function redraw(){render(canvas,state,plan,page,1,null,$('safeGuides').checked)}
+function settings(){
+  $('timing').hidden=$('play').hidden=state.kind!=='Reel';$('quality').value=state.quality;
+  const a=state.attachment;$('assetRow').hidden=!a;$('mediaName').textContent=a?.name||'';
+  $('audioRow').hidden=a?.type!=='video';$('audio').checked=state.includeAudio;
+  const k=plan.metrics[page].key;$('seconds').value=state.seconds;$('perSlide').value=state.durations?.[k]??'';
+  $('perSlide').placeholder=state.seconds+' (default)';$('slideLabel').textContent='Slide '+(page+1)+' seconds';
+  const total=plan.metrics.reduce((n,m)=>n+durationFor(state,m.key),0);
+  $('runtime').textContent=plan.pages.length+' '+(plan.pages.length===1?'slide':'slides')+' · '+Number(total.toFixed(1))+' seconds total';
+  $('fitNote').hidden=plan.metrics[page].px>=Math.min(plan.w,plan.h)*.029;
+}
+$('quality').onchange=()=>{state.quality=$('quality').value;paint()};
+$('safeGuides').onchange=redraw;
+function editSeconds(el,override){
+  const v=el.value,n=Number(v);if(v&&!(n>=.5&&n<=60)){el.reportValidity();return}
+  halt();if(override){state.durations={...state.durations};const k=plan.metrics[page].key;if(v)state.durations[k]=n;else delete state.durations[k]}
+  else if(v)state.seconds=n;
+  settings()
+}
+$('seconds').oninput=e=>{if(e.target.value&&e.target.validity.valid){state.seconds=Number(e.target.value);halt();$('runtime').textContent=Number(plan.metrics.reduce((n,m)=>n+durationFor(state,m.key),0).toFixed(1))+' seconds total'}};
+$('perSlide').oninput=e=>{const k=plan.metrics[page].key;if(e.target.validity.valid){state.durations={...state.durations};if(e.target.value)state.durations[k]=Number(e.target.value);else delete state.durations[k];halt();$('runtime').textContent=Number(plan.metrics.reduce((n,m)=>n+durationFor(state,m.key),0).toFixed(1))+' seconds total'}};
+$('seconds').onchange=()=>editSeconds($('seconds'),false);$('perSlide').onchange=()=>editSeconds($('perSlide'),true);
+$('play').onclick=async()=>{
+  if(previewTimer){halt();return}const a=state.attachment;
+  if(a?.type==='video'){try{a.element.currentTime=0;a.element.loop=true;await a.element.play()}catch{notice('Could not play the clip.');return}}
+  let sum=0;const ends=plan.metrics.map(m=>sum+=durationFor(state,m.key)*1000),start=performance.now();
+  page=0;paint();$('play').textContent='Pause';
+  previewTimer=setInterval(()=>{const i=ends.findIndex(t=>t>performance.now()-start);if(i<0){halt();page=0;paint()}else if(page!==i){page=i;paint()}else redraw()},50);
+};
+
 function paint() {
   plan = layout(state);
   page = Math.min(page, plan.pages.length - 1);
-  render(canvas, state, plan, page);
+  redraw(); settings();
   canvas.setAttribute(
     "aria-label",
     state.style + " design. " + plan.pages[page].join(" "),
   );
   $("counter").textContent = page + 1 + " / " + plan.pages.length;
-  $("dimension").textContent = plan.w + " × " + plan.h + " px";
+  $("dimension").textContent = dimensions(state.size,state.quality).join(" × ")+" px";
   $("prev").disabled = page === 0;
   $("next").disabled = page + 1 >= plan.pages.length;
   $("sample").textContent = state.sample
@@ -157,6 +211,7 @@ function paint() {
     : styles.find((s) => s.id === state.style).name;
 }
 function sync() {
+  halt();sourceMedia();
   if (state.avatar)
     loadAvatar(state.avatar).then((ok) => {
       if (ok) paint();
@@ -187,14 +242,14 @@ function sync() {
 }
 function gallery() {
   $("cards").replaceChildren();
-  let chosen = all ? styles : styles.slice(0, 4);
+  let chosen = all ? styles : [styles[0],...styles.slice(8,13)];
   if (!all && !chosen.some((s) => s.id === state.style))
-    chosen = [...chosen.slice(0, 3), styles.find((s) => s.id === state.style)];
+    chosen = [...chosen.slice(0, -1), styles.find((s) => s.id === state.style)];
   for (const s of chosen) {
     const b = btn(
       "",
       () => {
-        state.style = s.id;
+        halt();state.style = s.id;
         paint();
         gallery();
       },
@@ -213,7 +268,7 @@ function gallery() {
     $("cards").append(b);
   }
   $("allTemplates").replaceChildren(
-    document.createTextNode(all ? "Show featured" : "View all styles"),
+    document.createTextNode(all ? "Show featured" : "All "+styles.length+" styles"),
     icon("grid"),
   );
 }
@@ -238,7 +293,7 @@ $("platform").onchange = (e) => {
   sync();
 };
 $("size").onchange = (e) => {
-  state.size = e.target.value;
+  halt();state.size = e.target.value;
   page = 0;
   paint();
 };
@@ -254,17 +309,17 @@ for (const [id, key] of [
       $("author").value = state.author;
       $("handle").value = state.handle;
     }
-    state[key] = e.target.value;
+    halt();state[key] = e.target.value;
     state.sample = false;
     page = 0;
     paint();
   };
 $("prev").onclick = () => {
-  page--;
+  halt();page--;
   paint();
 };
 $("next").onclick = () => {
-  page++;
+  halt();page++;
   paint();
 };
 $("expand").onclick = () => {
@@ -317,7 +372,8 @@ $("importForm").onsubmit = async (e) => {
     if (typeof d.text !== "string" || !d.text.trim())
       throw Error("No readable post text was returned.");
     if (n !== importRun) return;
-    Object.assign(state, {
+    resetAsset();state.durations={};Object.assign(state, {
+      importedMedia:Array.isArray(d.media)?d.media:[],
       text: d.text,
       author: String(d.authorName || ""),
       handle: String(d.handle || ""),
@@ -379,7 +435,8 @@ $("save").onclick = () => {
   l.htmlFor = i.id = "draftName";
   i.value = state.text.slice(0, 55);
   i.maxLength = 80;
-  const save = () => {
+  let saving=false;
+  const save = async () => {
     const d = read();
     if (d.length >= 40) {
       notice("Remove a saved design before adding another.");
@@ -389,15 +446,15 @@ $("save").onclick = () => {
       i.focus();
       return;
     }
-    if (
-      write([
-        { id: crypto.randomUUID(), name: i.value.trim(), state: { ...state } },
-        ...d,
-      ])
-    ) {
-      modal.close();
-      notice("Design saved on this device");
-    }
+    if(saving)return;saving=true;
+    const id=crypto.randomUUID(),{attachment,...snapshot}=state;
+    try {
+      if(attachment)await draftMedia(id,'put',attachment.file);
+      if(write([{id,name:i.value.trim(),state:snapshot,hasMedia:!!attachment},...read()])){
+        modal.close();notice("Design saved on this device");
+      }else if(attachment)await draftMedia(id,'delete');
+    }catch{notice("Could not save the attachment. Check device storage and try again.")}
+    finally{saving=false}
   };
   b.append(l, i, btn("Save design", save, "btn primary dialogactions"));
   i.onkeydown = (e) => {
@@ -422,8 +479,13 @@ function saved() {
     );
     row.append(
       label,
-      btn("Open", () => {
-        state = { ...defaultState, ...d.state };
+      btn("Open", async () => {
+        let media=null;
+        try{if(d.hasMedia){const blob=await draftMedia(d.id,'get');if(!blob)throw Error();media=await openAttachment(blob)}}
+        catch{notice('The saved media is unavailable. Opening text and settings.')}
+        resetAsset();
+        state = { ...defaultState, ...d.state,attachment:media };
+        if(media)$("mediaOptions").open=true;
         page = 0;
         mode("text");
         sync();
@@ -434,7 +496,7 @@ function saved() {
         box.append(
           elt("p", d.name),
           btn("Remove from this device", () => {
-            if (write(read().filter((i) => i.id !== d.id))) saved();
+            if (write(read().filter((i) => i.id !== d.id))) {if(d.hasMedia)draftMedia(d.id,"delete").catch(()=>{});saved()}
           }),
         );
       }),
@@ -452,11 +514,11 @@ $("help").onclick = () => {
     ],
     [
       "Choose the output",
-      "Post makes graphics. Carousel divides your text into slides. Reel turns your slides into a silent vertical video. For uploaded footage, original X media, or classic templates, use the media composer.",
+      "Each bullet stays together. Attach a photo or video, set reel timing per slide, and select Standard, 2K or 4K export quality.",
     ],
     [
       "Export a platform pack",
-      "Select one or more platforms in Export. Multiple files download together as a ZIP. LinkedIn carousels export as PDF.",
+      "Safe-area guides estimate where app controls sit. Overlays vary by device, placement and caption. Select one or more platforms in Export. Multiple files download together as a ZIP. LinkedIn carousels export as PDF.",
     ],
     [
       "Your drafts",
@@ -473,6 +535,7 @@ $("export").onclick = () => {
     notice("Add post text first.");
     return;
   }
+  halt();
   const b = open("Export " + state.kind.toLowerCase()),
     targets = Object.keys(platforms).filter((p) => platforms[p][state.kind]),
     checks = [];
@@ -481,7 +544,7 @@ $("export").onclick = () => {
     elt(
       "p",
       kind === "Reel"
-        ? "Export a silent, 9:16 video in " +
+        ? "Export a 9:16 video in " +
             (videoType().includes("mp4") ? "MP4" : "WebM when supported") +
             ". Keep this tab visible during recording."
         : "Choose the platforms to include. Multiple files download together as a ZIP.",
@@ -504,7 +567,7 @@ $("export").onclick = () => {
       document.createTextNode(
         p +
           " · " +
-          sizes[size].join(" × ") +
+          dimensions(size,state.quality).join(" × ") +
           (p === "LinkedIn" && kind === "Carousel" ? " · PDF" : ""),
       ),
     );
