@@ -1,4 +1,5 @@
-import { layout, render, platforms } from "./render.js";
+import { dimensions, durationFor, layout, render, platforms } from "./render.js";
+import { openAttachment, releaseAttachment } from "./media.js";
 const utf = new TextEncoder();
 export function download(blob, name) {
   const u = URL.createObjectURL(blob),
@@ -34,12 +35,13 @@ function header(size) {
   const bytes = new Uint8Array(size);
   return { bytes, v: new DataView(bytes.buffer) };
 }
-export async function zip(files) {
+export async function zip(files, signal) {
   const entries = [],
     directory = [];
   let offset = 0,
     centralSize = 0;
   for (const f of files) {
+    signal?.throwIfAborted();
     const name = utf.encode(f.name),
       data = new Uint8Array(await f.blob.arrayBuffer()),
       sum = crc(data);
@@ -74,7 +76,7 @@ export async function zip(files) {
     type: "application/zip",
   });
 }
-async function slidePdf(canvas, state, plan, signal) {
+async function slidePdf(canvas, state, plan, signal, output) {
   const chunks = [],
     offsets = [0];
   let pos = 0;
@@ -82,6 +84,7 @@ async function slidePdf(canvas, state, plan, signal) {
     const b = typeof data === "string" ? utf.encode(data) : data;
     chunks.push(b);
     pos += b.length;
+    if (pos > packLimit) throw tooLarge();
   }
   function obj(n, ...body) {
     offsets[n] = pos;
@@ -101,7 +104,7 @@ async function slidePdf(canvas, state, plan, signal) {
   );
   for (let i = 0; i < plan.pages.length; i++) {
     signal.throwIfAborted();
-    render(canvas, state, plan, i);
+    render(canvas, state, plan, i, 1, output);
     const jpg = new Uint8Array(
         await (await raster(canvas, "image/jpeg")).arrayBuffer(),
       ),
@@ -122,9 +125,9 @@ async function slidePdf(canvas, state, plan, signal) {
     obj(
       n + 1,
       "<< /Type /XObject /Subtype /Image /Width " +
-        plan.w +
+        canvas.width +
         " /Height " +
-        plan.h +
+        canvas.height +
         " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " +
         jpg.length +
         " >>\nstream\n",
@@ -149,166 +152,141 @@ async function slidePdf(canvas, state, plan, signal) {
   );
   return new Blob(chunks, { type: "application/pdf" });
 }
+const packLimit = 200*1024*1024;
+const tooLarge=()=>Error("This pack exceeds 200 MB. Export fewer platforms or reduce the resolution.");
 export function videoType() {
-  return typeof MediaRecorder === "undefined"
-    ? ""
-    : [
-        "video/mp4;codecs=avc1.42001E",
-        "video/mp4",
-        "video/webm;codecs=vp9",
-        "video/webm",
-      ].find((t) => MediaRecorder.isTypeSupported(t)) || "";
+  if (typeof MediaRecorder==="undefined") return "";
+  return ["video/mp4","video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"].find(t=>MediaRecorder.isTypeSupported(t)) || "";
 }
-async function video(canvas, state, plan, signal, progress) {
-  const mime = videoType();
-  if (!mime || !canvas.captureStream)
-    throw Error(
-      "This browser cannot record a reel. Try a current desktop browser or export images.",
-    );
-  render(canvas, state, plan);
-  const stream = canvas.captureStream(24);
-  let recorder, timer;
+function readyToPlay(task,signal) {
+  return new Promise((ok,no)=>{
+    const finish=(fn,value)=>{clearTimeout(timer);signal.removeEventListener("abort",cancel);fn(value);};
+    const cancel=()=>finish(no,signal.reason);
+    const timer=setTimeout(()=>finish(no,Error("Keep the tab active and allow media playback to record the reel.")),12000);
+    signal.addEventListener("abort",cancel,{once:true});
+    Promise.resolve(task).then(v=>finish(ok,v),e=>finish(no,e));
+    if(signal.aborted)cancel();
+  });
+}
+async function video(canvas,state,plan,signal,progress,output,audio) {
+  const mime=videoType();
+  if(!mime || !canvas.captureStream) throw Error("This browser cannot record a reel. Try a current desktop browser or export images.");
+  let runtime=0;
+  const ends=plan.metrics.map(m=>runtime+=1000*durationFor(state,m.key));
+  let asset,stream,recorder,source,mix,timer,cancel;
   try {
-    recorder = new MediaRecorder(stream, {
-      mimeType: mime,
-      videoBitsPerSecond: 4200000,
-    });
-    const chunks = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size) chunks.push(e.data);
-    };
-    const done = new Promise((ok, no) => {
-      recorder.onstop = ok;
-      recorder.onerror = () =>
-        no(Error("Video encoding failed. Try another browser."));
-    });
-    const stop = () => {
-      if (recorder.state !== "inactive") recorder.stop();
-    };
-    signal.addEventListener("abort", stop, { once: true });
-    try {
-      signal.throwIfAborted();
-      recorder.start(500);
-      const start = performance.now(),
-        duration = plan.pages.length * 2600;
-      timer = setInterval(() => {
-        const t = performance.now() - start;
-        if (t >= duration) {
-          stop();
-          return;
-        }
-        const frame = Math.min(plan.pages.length - 1, Math.floor(t / 2600));
-        render(
-          canvas,
-          state,
-          plan,
-          frame,
-          0.74 + 0.26 * Math.min(1, (t % 2600) / 300),
-        );
-        progress(
-          "Recording reel · " + Math.ceil((duration - t) / 1000) + "s left",
-        );
-      }, 1000 / 24);
-      await done;
-      signal.throwIfAborted();
-      if (!chunks.length)
-        throw Error("The video encoder returned an empty file.");
-      return new Blob(chunks, { type: mime });
-    } finally {
-      signal.removeEventListener("abort", stop);
-      stop();
+    signal.throwIfAborted();
+    if(state.attachment?.type==="video"){
+      asset=await openAttachment(state.attachment.file,signal);
+      state={...state,attachment:asset};
+      asset.element.loop=true;
+      if(audio){
+        mix=audio.createMediaStreamDestination();
+        source=audio.createMediaElementSource(asset.element);
+        source.connect(mix);
+        asset.element.muted=false;
+      }
     }
+    render(canvas,state,plan,0,1,output);
+    stream=canvas.captureStream(24);
+    if(mix)for(const t of mix.stream.getAudioTracks())stream.addTrack(t);
+    recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:Math.max(5000000,canvas.width*canvas.height*3),...(mix?{audioBitsPerSecond:128000}:{})});
+    if(asset)await readyToPlay(asset.element.play(),signal);
+    signal.throwIfAborted();
+    const chunks=[];
+    await new Promise((ok,no)=>{
+      let total=0,frame=0,last=-1;
+      recorder.onerror=()=>no(Error("Video encoding failed. Try a lower resolution or another browser."));
+      recorder.ondataavailable=e=>{
+        total+=e.data.size;
+        if(total>packLimit){no(tooLarge());return;}
+        if(e.data.size)chunks.push(e.data);
+      };
+      recorder.onstop=ok;
+      cancel=()=>no(signal.reason);
+      signal.addEventListener("abort",cancel,{once:true});
+      recorder.start(500);
+      const start=performance.now();
+      function tick(){
+        try{
+          const t=performance.now()-start;
+          if(t>=runtime){clearInterval(timer);if(recorder.state!=="inactive")recorder.stop();return;}
+          while(frame+1<ends.length && t>=ends[frame])frame++;
+          const age=t-(frame?ends[frame-1]:0);
+          render(canvas,state,plan,frame,.74+.26*Math.min(1,age/300),output);
+          const left=Math.ceil((runtime-t)/1000);
+          if(last!==left){last=left;progress("Recording reel · "+left+"s left");}
+        }catch(e){no(e);}
+      }
+      timer=setInterval(tick,1000/24);tick();
+    });
+    signal.throwIfAborted();
+    if(!chunks.length)throw Error("The video encoder returned an empty file.");
+    return new Blob(chunks,{type:recorder.mimeType||mime});
   } finally {
     clearInterval(timer);
-    stream.getTracks().forEach((t) => t.stop());
+    if(cancel)signal.removeEventListener("abort",cancel);
+    if(recorder){
+      recorder.ondataavailable=recorder.onerror=recorder.onstop=null;
+      if(recorder.state!=="inactive")recorder.stop();
+    }
+    stream?.getTracks().forEach(t=>t.stop());
+    mix?.stream.getTracks().forEach(t=>t.stop());
+    source?.disconnect();mix?.disconnect();releaseAttachment(asset);
   }
 }
-async function collect(state, targets, signal, progress) {
-  const files = [],
-    canvas = document.createElement("canvas"),
-    cache = new Map();
-  let bytes = 0;
-  for (const p of targets) {
-    const available = platforms[p][state.kind];
-    if (!available) continue;
-    const size =
-        p === state.platform && available.includes(state.size)
-          ? state.size
-          : available[0],
-      plan = layout(state, size, state.kind);
-    const prefix =
-      p.toLowerCase() + "-" + state.kind.toLowerCase() + "-" + state.style;
-    const pdf = p === "LinkedIn" && state.kind === "Carousel",
-      key = size + "-" + pdf;
-    if (!cache.has(key)) {
-      const parts = [];
-      progress("Rendering " + p + "…");
-      if (state.kind === "Reel") {
-        const b = await video(canvas, state, plan, signal, progress);
-        parts.push({
-          suffix: b.type.includes("mp4") ? ".mp4" : ".webm",
-          blob: b,
-        });
-      } else if (pdf) {
-        parts.push({
-          suffix: ".pdf",
-          blob: await slidePdf(canvas, state, plan, signal),
-        });
-      } else
-        for (let i = 0; i < plan.pages.length; i++) {
-          signal.throwIfAborted();
-          render(canvas, state, plan, i);
-          parts.push({
-            suffix:
-              (plan.pages.length > 1
-                ? "-" + String(i + 1).padStart(2, "0")
-                : "") + ".png",
-            blob: await raster(canvas),
-          });
-        }
-      cache.set(key, parts);
-    }
-    for (const a of cache.get(key)) {
-      bytes += a.blob.size;
-      if (bytes > 200 * 1024 * 1024)
-        throw Error(
-          "This pack exceeds 200 MB. Export fewer platforms at once.",
-        );
-      files.push({ name: prefix + a.suffix, blob: a.blob });
-    }
-  }
-  signal.throwIfAborted();
-  if (!files.length) throw Error("Choose a platform.");
-  return files;
-}
-export async function exportSet(
-  state,
-  targets,
-  signal,
-  progress,
-  allFormats = false,
-) {
-  const files = [];
-  for (const kind of allFormats ? ["Post", "Carousel", "Reel"] : [state.kind]) {
-    const supported = targets.filter((p) => platforms[p][kind]);
-    if (!supported.length) continue;
-    files.push(
-      ...(await collect({ ...state, kind }, supported, signal, progress)),
-    );
-    if (files.reduce((n, f) => n + f.blob.size, 0) > 200 * 1024 * 1024)
-      throw Error("This pack exceeds 200 MB. Export fewer platforms at once.");
-  }
-  signal.throwIfAborted();
-  if (files.length === 1) download(files[0].blob, files[0].name);
-  else {
-    progress("Packing " + files.length + " files…");
-    const blob = await zip(files);
+export async function exportSet(state,targets,signal,progress,allFormats=false){
+  const files=[],seen=new Set(),canvas=document.createElement("canvas");
+  const kinds=allFormats?["Post","Carousel","Reel"]:[state.kind];
+  let still,audio,bytes=0;
+  function add(name,blob){bytes+=blob.size;if(bytes>packLimit)throw tooLarge();files.push({name,blob});}
+  try{
     signal.throwIfAborted();
-    download(
-      blob,
-      "tweet-studio-" +
-        (allFormats ? "creator-pack" : state.kind.toLowerCase()) +
-        ".zip",
-    );
+    if(state.attachment?.type==="video"){
+      if(state.includeAudio && kinds.includes("Reel") && targets.some(p=>platforms[p]?.Reel)){
+        const Audio=window.AudioContext||window.webkitAudioContext;
+        if(!Audio)throw Error("This browser cannot include source audio. Turn audio off or try another browser.");
+        audio=new Audio();
+        await readyToPlay(audio.resume(),signal);
+        if(audio.state!=="running")throw Error("Allow audio playback in this tab to include source audio.");
+      }
+      if(kinds.some(k=>k!=="Reel"))still=await openAttachment(state.attachment.file,signal);
+    }
+    for(const kind of kinds)for(const platform of targets){
+      signal.throwIfAborted();
+      const available=platforms[platform]?.[kind];
+      if(!available?.length)continue;
+      const size=platform===state.platform && available.includes(state.size)?state.size:available[0];
+      const quality=state.quality||"Standard", key=[platform,kind,size,quality,state.style].join("|");
+      if(seen.has(key))continue;
+      seen.add(key);
+      const variant={...state,kind,platform,size,attachment:still||state.attachment};
+      const plan=layout(variant,size,kind,platform),output=dimensions(size,quality);
+      const prefix=[platform,kind,state.style].join("-").toLowerCase();
+      progress("Rendering "+platform+"…");
+      if(kind==="Reel"){
+        const blob=await video(canvas,variant,plan,signal,progress,output,audio);
+        add(prefix+(blob.type.includes("mp4")?".mp4":".webm"),blob);
+      }else if(platform==="LinkedIn" && kind==="Carousel"){
+        add(prefix+".pdf",await slidePdf(canvas,variant,plan,signal,output));
+      }else for(let i=0;i<plan.pages.length;i++){
+        signal.throwIfAborted();
+        render(canvas,variant,plan,i,1,output);
+        add(prefix+(plan.pages.length>1?"-"+String(i+1).padStart(2,"0"):"")+".png",await raster(canvas));
+      }
+    }
+    signal.throwIfAborted();
+    if(!files.length)throw Error("Choose a platform that supports this format.");
+    if(files.length===1)download(files[0].blob,files[0].name);
+    else{
+      progress("Packing "+files.length+" files…");
+      const blob=await zip(files,signal);
+      signal.throwIfAborted();
+      download(blob,"tweet-studio-"+(allFormats?"creator-pack":state.kind.toLowerCase())+".zip");
+    }
+  }finally{
+    releaseAttachment(still);
+    canvas.width=canvas.height=1;
+    if(audio && audio.state!=="closed")await audio.close().catch(()=>{});
   }
 }

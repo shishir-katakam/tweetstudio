@@ -36,6 +36,8 @@
       }
     </script>
     <script type="module" src="/studio/app.js"></script>
+  <link rel="stylesheet" href="/studio/dark.css">
+    <script src="/studio/theme.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to editor</a>
@@ -74,6 +76,7 @@
           ><i data-i="panel"></i>Workspace <span>/</span>
           <b>Content studio</b></span
         ><span class="local"><i data-i="lock"></i> Local workspace</span>
+      <select class="appearance-select" data-appearance aria-label="Appearance" title="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
       </header>
       <main id="main">
         <div class="pagehead">
@@ -148,6 +151,16 @@
                 <i data-i="ratio"></i
                 ><select id="size"></select>
               </div>
+              <label for="quality">Export quality</label>
+              <div class="selectbox"><i data-i="frame"></i><select id="quality"><option value="Standard">Standard · native size</option><option value="2K">2K · 2560 px long edge</option><option value="4K">4K master · 3840 px long edge</option></select></div>
+              <details id="mediaOptions" class="mediaoptions"><summary>Photo or video <small>Optional</small></summary>
+                <p class="fieldnote">Use one visual across your slides. A video plays in reels and supplies a still frame for posts.</p>
+                <label for="file">Choose photo or video</label><input id="file" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,video/*">
+                <div id="assetRow" hidden><span id="mediaName"></span><button id="removeAsset" class="textbtn">Remove</button></div>
+                <label id="audioRow" class="checkline" hidden><input id="audio" type="checkbox" checked>Include clip audio in reels</label>
+                <div id="sourceMedia"></div><p role="status" class="fieldnote" id="assetStatus"></p>
+              </details>
+              <div id="timing" hidden><hr><h3>Reel timing</h3><div class="timings"><div><label for="seconds">Default seconds</label><input type="number" min="0.5" max="60" step="0.1" id="seconds"></div><div><label id="slideLabel" for="perSlide">This slide</label><input type="number" min="0.5" max="60" step="0.1" id="perSlide"></div></div><p class="fieldnote" id="runtime"></p></div>
             </div>
           </section>
           <section class="card preview">
@@ -164,7 +177,7 @@
                 aria-label="Post design preview"
               ></canvas>
             </div>
-            <div class="previewfoot">
+            <div class="previewbar"><label class="checkline"><input type="checkbox" id="safeGuides">Show safe area</label><button class="textbtn" id="play" hidden>Play reel</button></div><p id="fitNote" class="fieldnote" hidden>This point needs small type to fit. Shorten it or use a taller canvas for easier reading.</p><div class="previewfoot">
               <span><i data-i="frame"></i><b id="dimension"></b></span>
               <div class="slides">
                 <button id="prev" aria-label="Previous slide">

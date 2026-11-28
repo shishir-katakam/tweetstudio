@@ -882,3 +882,4 @@ footer nav {
     justify-content: flex-start;
   }
 }
+.previewbar,.timings,#assetRow,.checkline{display:flex;align-items:center;gap:10px}.previewbar{padding:9px 15px;justify-content:space-between;border-top:1px solid #dadde4}.checkline{font-size:13px;margin:0}.controls .checkline input,.checkline input{width:auto;accent-color:#455eff}.mediaoptions{border-top:1px solid #dee1e8;padding-top:13px}.controls .mediaoptions{margin-top:16px}.mediaoptions summary{font-weight:650}.mediaoptions small{font-weight:400;margin-left:5px}.timings>div{flex:1;min-width:0}.fieldnote{font-size:13px;line-height:1.5;margin:6px 0;color:#647080}.stage canvas{max-height:clamp(300px,46vh,530px)}#fitNote{padding:0 15px}#assetRow{justify-content:space-between;font-size:13px}#mediaName{overflow-wrap:anywhere}.cards{grid-template-columns:repeat(auto-fit,minmax(min(175px,100%),1fr))}@media(max-width:620px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.stage canvas{max-height:390px}}
